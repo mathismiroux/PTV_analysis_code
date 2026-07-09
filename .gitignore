@@ -1,1 +1,19 @@
+# Local data files are large and should not be committed.
 *.nc
+data/
+
+# Python environments and generated files.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local visualization exports.
+outputs/
+*.gif
+*.mp4
+*.avi
+*.mov

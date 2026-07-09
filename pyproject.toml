@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptv-flow"
+version = "0.1.0"
+description = "Read and visualize 3D PTV velocity fields stored in NetCDF4/HDF5 files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py>=3.11",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[project.scripts]
+ptv-flow = "ptv_flow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ptv_flow*"]

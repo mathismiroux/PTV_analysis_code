@@ -160,6 +160,8 @@ python main.py "path\to\raw_file.nc" --temporal-average --min-valid-fraction 0.8
 Options:
 
 - `--output path.nc`: output file for the averaged volume.
+- `--overwrite`: allow replacing an existing output file. Without this flag,
+  the command refuses to overwrite existing results.
 - `--chunk-size N`: number of time steps read at once. Larger values can be
   faster but use more memory.
 - `--zero-mask component`: default. Ignore exact zeros independently for
@@ -172,6 +174,11 @@ Options:
 
 The output file contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
 `u_count`, `v_count`, `w_count`, and `speed_from_mean`.
+
+Processed files store provenance metadata in the file attributes and in a
+`provenance` group, including the source file path, source file name, source
+file size, creation time, operation, zero-mask mode, chunk size, and minimum
+valid-count settings.
 
 ### Visualize A Temporal-Average Volume
 

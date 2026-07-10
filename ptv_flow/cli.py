@@ -124,6 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="output path for postprocessing results",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="allow postprocessing to replace an existing --output file",
+    )
+    parser.add_argument(
         "--average-file",
         type=Path,
         default=None,
@@ -183,13 +188,17 @@ def main() -> None:
             output = args.output
             if output is None:
                 output = Path("outputs") / f"{args.path.stem}_temporal_mean.nc"
-            temporal_average_volume(
-                flow,
-                output=output,
-                chunk_size=args.chunk_size,
-                zero_mask=args.zero_mask,
-                min_valid_fraction=args.min_valid_fraction,
-            )
+            try:
+                temporal_average_volume(
+                    flow,
+                    output=output,
+                    chunk_size=args.chunk_size,
+                    zero_mask=args.zero_mask,
+                    min_valid_fraction=args.min_valid_fraction,
+                    overwrite=args.overwrite,
+                )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
         elif args.animate:
             animate_z_plane(
                 flow,

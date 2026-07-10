@@ -20,6 +20,7 @@ def test_cli_help_runs():
     assert "--quantity" in result.stdout
     assert "--plane" in result.stdout
     assert "--plane-value" in result.stdout
+    assert "--overwrite" in result.stdout
 
 
 def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_path):
@@ -97,3 +98,28 @@ def test_cli_temporal_average_and_average_plane(tiny_flow_path, tmp_path):
         text=True,
     )
     assert figure_output.exists()
+
+
+def test_cli_temporal_average_refuses_existing_output(tiny_flow_path, tmp_path):
+    output = tmp_path / "existing.nc"
+    output.write_text("existing")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--temporal-average",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing to overwrite existing output file" in (
+        result.stdout + result.stderr
+    )
+    assert "Traceback" not in (result.stdout + result.stderr)
+    assert output.read_text() == "existing"

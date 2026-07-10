@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+import uuid
 
 import h5py
 import numpy as np
@@ -142,6 +144,7 @@ def temporal_average_volume(
     chunk_size: int = 50,
     zero_mask: str = "component",
     min_valid_fraction: float = 0.0,
+    overwrite: bool = False,
 ) -> Path:
     """Compute temporal mean velocity fields while ignoring exact zeros.
 
@@ -160,6 +163,8 @@ def temporal_average_volume(
     min_valid_fraction:
         Minimum fraction of time steps that must be valid at a voxel. Means
         with fewer valid samples are set to NaN. Use 0.8 for an 80% cutoff.
+    overwrite:
+        Replace an existing output file. By default existing files are refused.
     """
 
     if chunk_size <= 0:
@@ -170,7 +175,15 @@ def temporal_average_volume(
         raise ValueError("min_valid_fraction must be between 0 and 1")
 
     output = Path(output)
+    if output.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing output file: {output}. "
+            "Choose a new --output path or pass --overwrite."
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output.with_name(
+        f"{output.name}.tmp-{uuid.uuid4().hex}"
+    )
     min_valid_count = int(np.ceil(min_valid_fraction * flow.n_times))
 
     sums = {
@@ -229,39 +242,59 @@ def temporal_average_volume(
         means["u"] * means["u"] + means["v"] * means["v"] + means["w"] * means["w"]
     )
 
-    with h5py.File(output, "w") as out:
-        out.attrs["source_file"] = str(flow.path.resolve())
-        out.attrs["operation"] = "temporal_average_volume_ignore_exact_zeros"
-        out.attrs["zero_mask"] = zero_mask
-        out.attrs["chunk_size"] = chunk_size
-        out.attrs["min_valid_fraction"] = min_valid_fraction
-        out.attrs["min_valid_count"] = min_valid_count
-        out.attrs["input_shape_time_z_y_x"] = flow.shape
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "temporal_average_volume_ignore_exact_zeros"
+            out.attrs["zero_mask"] = zero_mask
+            out.attrs["chunk_size"] = chunk_size
+            out.attrs["min_valid_fraction"] = min_valid_fraction
+            out.attrs["min_valid_count"] = min_valid_count
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
 
-        for name in COORDINATES:
-            if name == "t":
-                continue
-            out.create_dataset(name, data=flow.coordinate(name))
+            provenance = out.create_group("provenance")
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["chunk_size"] = chunk_size
+            provenance.attrs["min_valid_fraction"] = min_valid_fraction
+            provenance.attrs["min_valid_count"] = min_valid_count
 
-        for name in VELOCITY_COMPONENTS:
+            for name in COORDINATES:
+                if name == "t":
+                    continue
+                out.create_dataset(name, data=flow.coordinate(name))
+
+            for name in VELOCITY_COMPONENTS:
+                out.create_dataset(
+                    f"{name}_mean",
+                    data=means[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_count",
+                    data=counts[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
             out.create_dataset(
-                f"{name}_mean",
-                data=means[name],
+                "speed_from_mean",
+                data=speed_from_mean,
                 compression="gzip",
                 compression_opts=4,
             )
-            out.create_dataset(
-                f"{name}_count",
-                data=counts[name],
-                compression="gzip",
-                compression_opts=4,
-            )
-        out.create_dataset(
-            "speed_from_mean",
-            data=speed_from_mean,
-            compression="gzip",
-            compression_opts=4,
-        )
-
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
     print(f"Saved temporal average to: {output.resolve()}", flush=True)
     return output

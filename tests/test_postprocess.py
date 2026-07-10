@@ -28,6 +28,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
     with h5py.File(tiny_flow_path, "r") as src, h5py.File(output, "r") as out:
         assert out.attrs["zero_mask"] == "component"
         assert set(out.keys()) == {
+            "provenance",
             "speed_from_mean",
             "u_count",
             "u_mean",
@@ -39,6 +40,10 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
             "y",
             "z",
         }
+        assert out.attrs["source_file"].endswith("tiny_flow.nc")
+        assert out.attrs["source_file_name"] == "tiny_flow.nc"
+        assert "created_utc" in out.attrs
+        assert out["provenance"].attrs["source_file"].endswith("tiny_flow.nc")
 
         for name in ("u", "v", "w"):
             expected_mean, expected_count = _expected_component_mean(src[name][:])
@@ -53,6 +58,38 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         np.testing.assert_allclose(
             out["speed_from_mean"][:], expected_speed, equal_nan=True
         )
+
+
+def test_temporal_average_refuses_to_overwrite_existing_output(tiny_flow_path, tmp_path):
+    output = tmp_path / "mean.nc"
+    output.write_text("existing")
+
+    with FlowDataset(tiny_flow_path) as flow:
+        try:
+            temporal_average_volume(flow, output=output, chunk_size=2)
+        except FileExistsError as exc:
+            assert "Refusing to overwrite" in str(exc)
+        else:
+            raise AssertionError("Expected FileExistsError")
+
+    assert output.read_text() == "existing"
+
+
+def test_temporal_average_overwrite_replaces_existing_output(tiny_flow_path, tmp_path):
+    output = tmp_path / "mean.nc"
+    output.write_text("existing")
+
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(
+            flow,
+            output=output,
+            chunk_size=2,
+            overwrite=True,
+        )
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["source_file_name"] == "tiny_flow.nc"
+        assert "u_mean" in out
 
 
 def test_temporal_average_vector_mask_differs_from_component_mask(tmp_path):

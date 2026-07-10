@@ -22,6 +22,8 @@ def test_cli_help_runs():
     assert "--plane-value" in result.stdout
     assert "--overwrite" in result.stdout
     assert "--apply-valid-fraction" in result.stdout
+    assert "--tke" in result.stdout
+    assert "--mean-file" in result.stdout
 
 
 def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_path):
@@ -162,3 +164,44 @@ def test_cli_apply_valid_fraction_to_existing_average(tiny_flow_path, tmp_path):
     )
 
     assert filtered_output.exists()
+
+
+def test_cli_tke_from_temporal_average(tiny_flow_path, tmp_path):
+    average_output = tmp_path / "mean.nc"
+    tke_output = tmp_path / "tke.nc"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--temporal-average",
+            "--chunk-size",
+            "2",
+            "--output",
+            str(average_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--tke",
+            "--mean-file",
+            str(average_output),
+            "--chunk-size",
+            "2",
+            "--output",
+            str(tke_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert tke_output.exists()

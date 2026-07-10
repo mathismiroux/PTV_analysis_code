@@ -412,3 +412,188 @@ def apply_valid_fraction_to_average(
     )
     print(f"Saved filtered average to: {output.resolve()}", flush=True)
     return output
+
+
+def _validate_mean_compatible(flow: FlowDataset, mean: TemporalAverageVolume) -> None:
+    if mean.grid_shape != flow.grid_shape:
+        raise ValueError(
+            "Mean file grid shape does not match raw file grid shape: "
+            f"{mean.grid_shape} != {flow.grid_shape}. "
+            f"raw={flow.path}, mean={mean.path}"
+        )
+
+    for name in ("x", "y", "z"):
+        raw_values = flow.coordinate(name)
+        mean_values = mean.coordinate(name)
+        if raw_values.shape != mean_values.shape or not np.allclose(
+            raw_values, mean_values, equal_nan=True
+        ):
+            raise ValueError(
+                f"Mean file {name!r} coordinates do not match raw file. "
+                f"raw={flow.path}, mean={mean.path}"
+            )
+
+    mean_source = mean._file.attrs.get("source_file")
+    if mean_source is None:
+        raise ValueError(
+            "Mean file is missing 'source_file' provenance, so TKE cannot "
+            f"verify that it was created from the raw file: {flow.path}"
+        )
+    if isinstance(mean_source, bytes):
+        mean_source = mean_source.decode()
+
+    raw_source_path = flow.path.resolve()
+    mean_source_path = Path(str(mean_source)).resolve()
+    if mean_source_path != raw_source_path:
+        raise ValueError(
+            "Mean file provenance does not match raw file. "
+            f"raw={raw_source_path}, mean_source={mean_source_path}, "
+            f"mean_file={mean.path}"
+        )
+
+
+def turbulent_kinetic_energy(
+    flow: FlowDataset,
+    mean: TemporalAverageVolume,
+    output: Path,
+    chunk_size: int = 50,
+    zero_mask: str = "component",
+    overwrite: bool = False,
+) -> Path:
+    """Compute turbulent kinetic energy from raw velocities and mean velocities.
+
+    The output stores component fluctuation variances and
+    ``tke = 0.5 * (u_prime2_mean + v_prime2_mean + w_prime2_mean)``.
+    Exact-zero raw values are ignored using the requested zero mask.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if zero_mask not in {"component", "vector"}:
+        raise ValueError("zero_mask must be 'component' or 'vector'")
+
+    _validate_mean_compatible(flow, mean)
+    output, temporary_output = _prepare_output_path(output, overwrite)
+
+    mean_fields = {
+        name: mean._file[f"{name}_mean"][:].astype(np.float64)
+        for name in VELOCITY_COMPONENTS
+    }
+    sum_squares = {
+        name: np.zeros(flow.grid_shape, dtype=np.float64)
+        for name in VELOCITY_COMPONENTS
+    }
+    counts = {
+        name: np.zeros(flow.grid_shape, dtype=np.uint32)
+        for name in VELOCITY_COMPONENTS
+    }
+
+    print(f"Reading NetCDF file: {flow.path.resolve()}", flush=True)
+    print(f"Reading mean velocity file: {mean.path.resolve()}", flush=True)
+    print(
+        f"Computing turbulent kinetic energy over {flow.n_times} time steps, "
+        f"grid={flow.grid_shape}, zero_mask={zero_mask}, chunk_size={chunk_size}",
+        flush=True,
+    )
+
+    start_time = perf_counter()
+    for start in range(0, flow.n_times, chunk_size):
+        stop = min(start + chunk_size, flow.n_times)
+        if zero_mask == "vector":
+            chunks = {
+                name: flow._file[name][start:stop, :, :, :]
+                for name in VELOCITY_COMPONENTS
+            }
+            vector_valid = np.logical_not(
+                (chunks["u"] == 0.0) & (chunks["v"] == 0.0) & (chunks["w"] == 0.0)
+            )
+            for name, data in chunks.items():
+                valid = vector_valid & np.isfinite(mean_fields[name])[None, :, :, :]
+                fluctuation = data - mean_fields[name][None, :, :, :]
+                sum_squares[name] += np.where(valid, fluctuation * fluctuation, 0.0).sum(
+                    axis=0, dtype=np.float64
+                )
+                counts[name] += valid.sum(axis=0, dtype=np.uint32)
+        else:
+            for name in VELOCITY_COMPONENTS:
+                data = flow._file[name][start:stop, :, :, :]
+                valid = (data != 0.0) & np.isfinite(mean_fields[name])[None, :, :, :]
+                fluctuation = data - mean_fields[name][None, :, :, :]
+                sum_squares[name] += np.where(valid, fluctuation * fluctuation, 0.0).sum(
+                    axis=0, dtype=np.float64
+                )
+                counts[name] += valid.sum(axis=0, dtype=np.uint32)
+
+        elapsed = perf_counter() - start_time
+        print(
+            f"Processed time steps {start:4d}-{stop - 1:4d} / "
+            f"{flow.n_times - 1} ({elapsed:.1f} s)",
+            flush=True,
+        )
+
+    variances = {}
+    for name in VELOCITY_COMPONENTS:
+        variances[name] = np.full(flow.grid_shape, np.nan, dtype=np.float64)
+        np.divide(
+            sum_squares[name],
+            counts[name],
+            out=variances[name],
+            where=counts[name] > 0,
+        )
+    tke = 0.5 * (variances["u"] + variances["v"] + variances["w"])
+
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            mean_path = mean.path.resolve()
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["mean_file"] = str(mean_path)
+            out.attrs["mean_file_name"] = mean_path.name
+            out.attrs["mean_file_parent"] = str(mean_path.parent)
+            out.attrs["mean_file_size_bytes"] = mean_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "turbulent_kinetic_energy"
+            out.attrs["formula"] = "0.5 * (mean(u_prime^2) + mean(v_prime^2) + mean(w_prime^2))"
+            out.attrs["zero_mask"] = zero_mask
+            out.attrs["chunk_size"] = chunk_size
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
+
+            provenance = out.create_group("provenance")
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["mean_file"] = str(mean_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["chunk_size"] = chunk_size
+
+            for name in COORDINATES:
+                if name == "t":
+                    continue
+                out.create_dataset(name, data=flow.coordinate(name))
+
+            for name in VELOCITY_COMPONENTS:
+                out.create_dataset(
+                    f"{name}_prime2_mean",
+                    data=variances[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_prime2_count",
+                    data=counts[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+            out.create_dataset("tke", data=tke, compression="gzip", compression_opts=4)
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(f"Saved turbulent kinetic energy to: {output.resolve()}", flush=True)
+    return output

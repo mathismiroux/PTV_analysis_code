@@ -8,6 +8,7 @@ from ptv_flow.postprocess import (
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
     temporal_average_volume,
+    turbulent_kinetic_energy,
 )
 from ptv_flow.reader import DEFAULT_FILE, FlowDataset
 from ptv_flow.visualize import animate_z_plane, show_temporal_average_plane
@@ -122,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="apply a valid-fraction cutoff to an existing temporal-average file",
     )
     parser.add_argument(
+        "--tke",
+        action="store_true",
+        help="compute turbulent kinetic energy from a raw file and a mean file",
+    )
+    parser.add_argument(
         "--quantity",
         choices=("speed", "u", "v", "w"),
         default="speed",
@@ -143,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="temporal-average file to compare in --inspect mode",
+    )
+    parser.add_argument(
+        "--mean-file",
+        type=Path,
+        default=None,
+        help="temporal-average velocity file used by --tke",
     )
     parser.add_argument(
         "--compare-average",
@@ -209,7 +221,25 @@ def main() -> None:
         return
 
     with FlowDataset(args.path) as flow:
-        if args.temporal_average:
+        if args.tke:
+            if args.mean_file is None:
+                raise SystemExit("--tke requires --mean-file.")
+            output = args.output
+            if output is None:
+                output = Path("outputs") / f"{args.path.stem}_tke.nc"
+            try:
+                with TemporalAverageVolume(args.mean_file) as mean:
+                    turbulent_kinetic_energy(
+                        flow,
+                        mean,
+                        output=output,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                    )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
+        elif args.temporal_average:
             output = args.output
             if output is None:
                 output = Path("outputs") / f"{args.path.stem}_temporal_mean.nc"

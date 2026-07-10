@@ -7,6 +7,7 @@ from ptv_flow.postprocess import (
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
     temporal_average_volume,
+    turbulent_kinetic_energy,
 )
 from ptv_flow.reader import FlowDataset
 
@@ -22,6 +23,24 @@ def _expected_component_mean(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         where=counts > 0,
     )
     return means, counts
+
+
+def _expected_component_prime2(
+    data: np.ndarray, mean: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    valid = (data != 0.0) & np.isfinite(mean)[None, :, :, :]
+    counts = valid.sum(axis=0, dtype=np.uint32)
+    variances = np.full(data.shape[1:], np.nan, dtype=np.float64)
+    fluctuation = data - mean[None, :, :, :]
+    np.divide(
+        np.where(valid, fluctuation * fluctuation, 0.0).sum(
+            axis=0, dtype=np.float64
+        ),
+        counts,
+        out=variances,
+        where=counts > 0,
+    )
+    return variances, counts
 
 
 def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_path):
@@ -200,6 +219,99 @@ def test_apply_valid_fraction_to_existing_average(tmp_path):
         assert out.attrs["derived_from_file"].endswith("mean.nc")
         assert out.attrs["min_valid_count"] == 4
         assert out["provenance"].attrs["derived_from_file"].endswith("mean.nc")
+
+
+def test_turbulent_kinetic_energy_matches_fixture(tiny_flow_path, tmp_path):
+    average_output = tmp_path / "mean.nc"
+    tke_output = tmp_path / "tke.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(flow, average_output, chunk_size=2)
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(average_output) as mean:
+        turbulent_kinetic_energy(flow, mean, output=tke_output, chunk_size=2)
+
+    with (
+        h5py.File(tiny_flow_path, "r") as src,
+        h5py.File(average_output, "r") as mean,
+        h5py.File(tke_output, "r") as out,
+    ):
+        assert out.attrs["operation"] == "turbulent_kinetic_energy"
+        assert out.attrs["source_file_name"] == "tiny_flow.nc"
+        assert out.attrs["mean_file_name"] == "mean.nc"
+        assert out["provenance"].attrs["source_file"].endswith("tiny_flow.nc")
+        assert out["provenance"].attrs["mean_file"].endswith("mean.nc")
+
+        expected_prime2 = {}
+        for name in ("u", "v", "w"):
+            variance, count = _expected_component_prime2(
+                src[name][:],
+                mean[f"{name}_mean"][:],
+            )
+            expected_prime2[name] = variance
+            np.testing.assert_allclose(
+                out[f"{name}_prime2_mean"][:], variance, equal_nan=True
+            )
+            np.testing.assert_array_equal(out[f"{name}_prime2_count"][:], count)
+
+        expected_tke = 0.5 * (
+            expected_prime2["u"] + expected_prime2["v"] + expected_prime2["w"]
+        )
+        np.testing.assert_allclose(out["tke"][:], expected_tke, equal_nan=True)
+
+
+def test_turbulent_kinetic_energy_refuses_shape_mismatch(tiny_flow_path, tmp_path):
+    mismatch = tmp_path / "mismatch_mean.nc"
+    with h5py.File(mismatch, "w") as h5:
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("u_mean", data=np.zeros((1, 1, 1)))
+        h5.create_dataset("v_mean", data=np.zeros((1, 1, 1)))
+        h5.create_dataset("w_mean", data=np.zeros((1, 1, 1)))
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(mismatch) as mean:
+        try:
+            turbulent_kinetic_energy(flow, mean, tmp_path / "tke.nc")
+        except ValueError as exc:
+            assert "grid shape does not match" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
+
+
+def test_turbulent_kinetic_energy_refuses_missing_mean_provenance(
+    tiny_flow_path, tmp_path
+):
+    mean_path = tmp_path / "mean_without_provenance.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(flow, mean_path, chunk_size=2)
+    with h5py.File(mean_path, "r+") as mean:
+        del mean.attrs["source_file"]
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(mean_path) as mean:
+        try:
+            turbulent_kinetic_energy(flow, mean, tmp_path / "tke.nc")
+        except ValueError as exc:
+            assert "missing 'source_file' provenance" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
+
+
+def test_turbulent_kinetic_energy_refuses_different_mean_source(
+    tiny_flow_path, tmp_path
+):
+    mean_path = tmp_path / "mean_from_other_raw.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(flow, mean_path, chunk_size=2)
+    with h5py.File(mean_path, "r+") as mean:
+        mean.attrs["source_file"] = str((tmp_path / "other_raw.nc").resolve())
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(mean_path) as mean:
+        try:
+            turbulent_kinetic_energy(flow, mean, tmp_path / "tke.nc")
+        except ValueError as exc:
+            assert "provenance does not match raw file" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
 
 
 def test_temporal_average_volume_reader(tiny_flow_path, tmp_path):

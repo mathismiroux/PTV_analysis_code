@@ -320,8 +320,7 @@ def inspect_flow_gui(
     ax = fig.add_axes((0.06, 0.20, 0.58, 0.72))
     text_ax = fig.add_axes((0.68, 0.20, 0.29, 0.72))
     frame_ax = fig.add_axes((0.18, 0.115, 0.39, 0.03))
-    z_ax = fig.add_axes((0.18, 0.07, 0.39, 0.03))
-    valid_ax = fig.add_axes((0.18, 0.025, 0.39, 0.03))
+    valid_ax = fig.add_axes((0.18, 0.07, 0.39, 0.03))
 
     image, quiver, q_slice = _draw_xy_vector_plane(
         ax=ax,
@@ -374,14 +373,6 @@ def inspect_flow_gui(
         valinit=frame_index,
         valstep=1,
     )
-    z_slider = Slider(
-        z_ax,
-        "z index",
-        0,
-        flow.grid_shape[0] - 1,
-        valinit=z_index,
-        valstep=1,
-    )
     valid_slider = Slider(
         valid_ax,
         "min valid frac",
@@ -394,24 +385,18 @@ def inspect_flow_gui(
     def current_min_valid_count() -> int:
         return max(int(np.ceil(float(valid_slider.val) * flow.n_times)), 1)
 
-    counts_by_z_index: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-
-    def current_counts() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        if z_index not in counts_by_z_index:
-            counts_by_z_index[z_index] = _valid_counts_for_z_plane(flow, z_index)
-        return counts_by_z_index[z_index]
+    counts_for_fixed_z = _valid_counts_for_z_plane(flow, z_index)
 
     def refresh() -> None:
-        nonlocal frame_index, z_index
+        nonlocal frame_index
         frame_index = int(frame_slider.val)
-        z_index = int(z_slider.val)
         min_valid_count = current_min_valid_count()
         plane = flow.read_z_plane(frame_index, z_index)
         display_speed, display_u, display_v, accepted = _apply_inspector_valid_mask(
             plane.speed,
             plane.u,
             plane.v,
-            current_counts(),
+            counts_for_fixed_z,
             min_valid_count,
         )
         image.set_data(display_speed)
@@ -451,7 +436,6 @@ def inspect_flow_gui(
         refresh()
 
     frame_slider.on_changed(lambda _value: refresh())
-    z_slider.on_changed(lambda _value: refresh())
     valid_slider.on_changed(lambda _value: refresh())
     fig.canvas.mpl_connect("button_press_event", on_click)
 

@@ -124,8 +124,9 @@ python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0
 python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0 --min-valid-fraction 0.8
 ```
 
-In the GUI, use the sliders to choose the frame, `z` plane, and minimum valid
-fraction. Click a cell in the slice to inspect:
+In the GUI, use the sliders to choose the frame and minimum valid fraction.
+The `z` plane is fixed when the GUI opens from the `--z` command-line value.
+Click a cell in the slice to inspect:
 
 - the selected indices and coordinates
 - raw `u`, `v`, `w`, and speed at the selected frame
@@ -188,6 +189,42 @@ Processed files store provenance metadata in the file attributes and in a
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings.
 
+### Compute Turbulent Kinetic Energy
+
+Compute turbulent kinetic energy from a raw 4D time series and an already
+computed mean velocity file:
+
+```powershell
+python main.py "path\to\raw_file.nc" --tke --mean-file outputs\temporal_mean.nc --output outputs\tke.nc
+```
+
+The command computes:
+
+```text
+k = 0.5 * (mean(u_prime^2) + mean(v_prime^2) + mean(w_prime^2))
+```
+
+where `u_prime = u - u_mean`, `v_prime = v - v_mean`, and
+`w_prime = w - w_mean` at each voxel. Exact-zero raw samples are ignored using
+the same `--zero-mask component` or `--zero-mask vector` modes as temporal
+averaging.
+
+Options:
+
+- `--mean-file path.nc`: temporal-average file containing `u_mean`, `v_mean`,
+  and `w_mean`. It must have the same `x`, `y`, `z` grid as the raw file.
+- `--output path.nc`: output file for the TKE volume.
+- `--overwrite`: allow replacing an existing output file.
+- `--chunk-size N`: number of time steps read at once.
+- `--zero-mask component`: default. Ignore exact zeros independently for
+  `u`, `v`, and `w`.
+- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
+  exactly zero.
+
+The output file contains `x`, `y`, `z`, `u_prime2_mean`, `v_prime2_mean`,
+`w_prime2_mean`, component counts, and `tke`. Provenance metadata records both
+the raw source file and the mean velocity file used to create the result.
+
 ### Apply A Valid-Fraction Cutoff To An Existing Average
 
 If you already have a temporal-average file, apply a valid-count cutoff without
@@ -229,6 +266,21 @@ Options:
   threshold.
 - `--quiver-step N`: arrow spacing. Larger values draw fewer arrows.
 - `--save path.png`: save the figure instead of opening an interactive window.
+
+### Compare Single And Double Precision
+
+Compare fluctuation and TKE quantities between the double-precision
+`Static_3.5D__b128.nc` file and the single-precision `Static_3.5D__b128f.nc`
+file in a wake shear-layer cube:
+
+```powershell
+python scripts\compare_precision_fluctuations.py --output outputs\precision_fluctuation_comparison_b128_180mm.txt
+```
+
+By default, the cube is centered at `y = 600 mm`, the center of the `x` range,
+and `z = 0 mm`, with a half-width of `90 mm` in every direction. This gives a
+180 mm x 180 mm x 180 mm analysis volume. Use `--half-width 30` for the
+original 60 mm cube.
 
 ## Optional Editable Install
 

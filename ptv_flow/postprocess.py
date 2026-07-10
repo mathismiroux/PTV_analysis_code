@@ -11,6 +11,18 @@ import numpy as np
 from ptv_flow.reader import COORDINATES, VELOCITY_COMPONENTS, FlowDataset
 
 
+def _prepare_output_path(output: Path, overwrite: bool) -> tuple[Path, Path]:
+    output = Path(output)
+    if output.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing output file: {output}. "
+            "Choose a new --output path or pass --overwrite."
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output.with_name(f"{output.name}.tmp-{uuid.uuid4().hex}")
+    return output, temporary_output
+
+
 class TemporalAverageVolume:
     """Reader for temporal-average output files created by this package."""
 
@@ -83,6 +95,9 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
+            u_count = self._file["u_count"][index, :, :] if "u_count" in self._file else None
+            v_count = self._file["v_count"][index, :, :] if "v_count" in self._file else None
+            w_count = self._file["w_count"][index, :, :] if "w_count" in self._file else None
         elif axis == "y":
             horizontal_axis = "x"
             vertical_axis = "z"
@@ -96,6 +111,9 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
+            u_count = self._file["u_count"][:, index, :] if "u_count" in self._file else None
+            v_count = self._file["v_count"][:, index, :] if "v_count" in self._file else None
+            w_count = self._file["w_count"][:, index, :] if "w_count" in self._file else None
         else:
             horizontal_axis = "y"
             vertical_axis = "z"
@@ -109,6 +127,9 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
+            u_count = self._file["u_count"][:, :, index] if "u_count" in self._file else None
+            v_count = self._file["v_count"][:, :, index] if "v_count" in self._file else None
+            w_count = self._file["w_count"][:, :, index] if "w_count" in self._file else None
 
         vector_horizontal = {"u": u, "v": v, "w": w}[vector_horizontal_name]
         vector_vertical = {"u": u, "v": v, "w": w}[vector_vertical_name]
@@ -134,6 +155,9 @@ class TemporalAverageVolume:
             "u": u,
             "v": v,
             "w": w,
+            "u_count": u_count,
+            "v_count": v_count,
+            "w_count": w_count,
             "speed": speed,
         }
 
@@ -174,16 +198,7 @@ def temporal_average_volume(
     if not 0.0 <= min_valid_fraction <= 1.0:
         raise ValueError("min_valid_fraction must be between 0 and 1")
 
-    output = Path(output)
-    if output.exists() and not overwrite:
-        raise FileExistsError(
-            f"Refusing to overwrite existing output file: {output}. "
-            "Choose a new --output path or pass --overwrite."
-        )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary_output = output.with_name(
-        f"{output.name}.tmp-{uuid.uuid4().hex}"
-    )
+    output, temporary_output = _prepare_output_path(output, overwrite)
     min_valid_count = int(np.ceil(min_valid_fraction * flow.n_times))
 
     sums = {
@@ -297,4 +312,103 @@ def temporal_average_volume(
             temporary_output.unlink()
         raise
     print(f"Saved temporal average to: {output.resolve()}", flush=True)
+    return output
+
+
+def apply_valid_fraction_to_average(
+    source: Path,
+    output: Path,
+    min_valid_fraction: float,
+    overwrite: bool = False,
+) -> Path:
+    """Apply a valid-count threshold to an existing temporal-average file."""
+
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+
+    source = Path(source)
+    if not source.exists():
+        raise FileNotFoundError(f"Could not find postprocessed file: {source}")
+
+    output, temporary_output = _prepare_output_path(output, overwrite)
+    print(f"Reading postprocessed file: {source.resolve()}", flush=True)
+
+    try:
+        with h5py.File(source, "r") as src, h5py.File(temporary_output, "w") as out:
+            if "input_shape_time_z_y_x" not in src.attrs:
+                raise KeyError(
+                    "Missing input_shape_time_z_y_x metadata; cannot infer "
+                    "number of time steps for valid-fraction filtering."
+                )
+            n_times = int(src.attrs["input_shape_time_z_y_x"][0])
+            min_valid_count = int(np.ceil(min_valid_fraction * n_times))
+
+            for key, value in src.attrs.items():
+                out.attrs[key] = value
+            out.attrs["derived_from_file"] = str(source.resolve())
+            out.attrs["derived_operation"] = "apply_valid_fraction_to_average"
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["min_valid_fraction"] = min_valid_fraction
+            out.attrs["min_valid_count"] = min_valid_count
+
+            for name in COORDINATES:
+                if name == "t":
+                    continue
+                src.copy(name, out)
+
+            means = {}
+            for name in VELOCITY_COMPONENTS:
+                count_name = f"{name}_count"
+                mean_name = f"{name}_mean"
+                if count_name not in src or mean_name not in src:
+                    raise KeyError(f"Missing {mean_name!r} or {count_name!r}")
+
+                counts = src[count_name][:]
+                mean = src[mean_name][:].astype(np.float64, copy=True)
+                mean[counts < min_valid_count] = np.nan
+                means[name] = mean
+
+                out.create_dataset(
+                    mean_name,
+                    data=mean,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                src.copy(count_name, out)
+
+            speed_from_mean = np.sqrt(
+                means["u"] * means["u"]
+                + means["v"] * means["v"]
+                + means["w"] * means["w"]
+            )
+            out.create_dataset(
+                "speed_from_mean",
+                data=speed_from_mean,
+                compression="gzip",
+                compression_opts=4,
+            )
+
+            provenance = out.create_group("provenance")
+            if "provenance" in src:
+                for key, value in src["provenance"].attrs.items():
+                    provenance.attrs[f"parent_{key}"] = value
+            provenance.attrs["derived_from_file"] = str(source.resolve())
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["derived_operation"]
+            provenance.attrs["min_valid_fraction"] = min_valid_fraction
+            provenance.attrs["min_valid_count"] = min_valid_count
+
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(
+        f"Applied min_valid_fraction={min_valid_fraction:g} "
+        f"(min_count={min_valid_count})",
+        flush=True,
+    )
+    print(f"Saved filtered average to: {output.resolve()}", flush=True)
     return output

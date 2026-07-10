@@ -21,6 +21,7 @@ def test_cli_help_runs():
     assert "--plane" in result.stdout
     assert "--plane-value" in result.stdout
     assert "--overwrite" in result.stdout
+    assert "--apply-valid-fraction" in result.stdout
 
 
 def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_path):
@@ -123,3 +124,41 @@ def test_cli_temporal_average_refuses_existing_output(tiny_flow_path, tmp_path):
     )
     assert "Traceback" not in (result.stdout + result.stderr)
     assert output.read_text() == "existing"
+
+
+def test_cli_apply_valid_fraction_to_existing_average(tiny_flow_path, tmp_path):
+    average_output = tmp_path / "mean.nc"
+    filtered_output = tmp_path / "mean_80.nc"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--temporal-average",
+            "--chunk-size",
+            "2",
+            "--output",
+            str(average_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(average_output),
+            "--apply-valid-fraction",
+            "0.8",
+            "--output",
+            str(filtered_output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert filtered_output.exists()

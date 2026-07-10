@@ -121,10 +121,11 @@ Open an interactive inspection GUI for a raw time-series file:
 
 ```powershell
 python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0
+python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0 --min-valid-fraction 0.8
 ```
 
-In the GUI, use the sliders to choose the frame and `z` plane. Click a cell in
-the slice to inspect:
+In the GUI, use the sliders to choose the frame, `z` plane, and minimum valid
+fraction. Click a cell in the slice to inspect:
 
 - the selected indices and coordinates
 - raw `u`, `v`, `w`, and speed at the selected frame
@@ -132,6 +133,13 @@ the slice to inspect:
 
 The inspector does not compute a full averaged volume. It only reads the time
 series for the one clicked voxel, which is why this value appears quickly.
+The minimum valid fraction can be changed interactively in the GUI. The
+selected-voxel means update immediately and are shown as accepted or rejected
+using the corresponding valid-count threshold. In the displayed slice, the
+raw frame colors stay unchanged, rejected cells are marked with a translucent
+red overlay, and their arrows are suppressed. The side panel still reports the
+raw value at the selected frame. Passing
+`--min-valid-fraction` sets the initial slider value.
 
 If you already computed a temporal-average output file, pass it too:
 
@@ -180,6 +188,22 @@ Processed files store provenance metadata in the file attributes and in a
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings.
 
+### Apply A Valid-Fraction Cutoff To An Existing Average
+
+If you already have a temporal-average file, apply a valid-count cutoff without
+re-reading the raw 4000-frame time series:
+
+```powershell
+python main.py outputs\temporal_mean.nc --apply-valid-fraction 0.8 --output outputs\temporal_mean_80pct.nc
+```
+
+This reads `u_count`, `v_count`, and `w_count`, sets means to `NaN` where the
+valid count is below the requested fraction, recomputes `speed_from_mean`, and
+writes a new file. The source average file is not modified.
+
+This command also refuses to overwrite existing outputs unless `--overwrite`
+is passed.
+
 ### Visualize A Temporal-Average Volume
 
 Plot one `x`, `y`, or `z` plane from a postprocessed temporal-average file:
@@ -188,6 +212,7 @@ Plot one `x`, `y`, or `z` plane from a postprocessed temporal-average file:
 python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0
 python main.py outputs\temporal_mean.nc --average-plane --plane x --plane-value 0 --quantity u
 python main.py outputs\temporal_mean.nc --average-plane --plane y --plane-value 0 --quantity speed
+python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --min-valid-fraction 0.8
 python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --save outputs\temporal_mean_z0.png
 ```
 
@@ -199,6 +224,9 @@ Options:
   The nearest available coordinate is used.
 - `--quantity {speed,u,v,w}`: scalar field shown as the color background.
   `speed` is the 3D velocity magnitude from the mean vector.
+- `--min-valid-fraction F`: mask the displayed slice without modifying the
+  file. For `speed`, a pixel is masked if any velocity component is below the
+  threshold.
 - `--quiver-step N`: arrow spacing. Larger values draw fewer arrows.
 - `--save path.png`: save the figure instead of opening an interactive window.
 

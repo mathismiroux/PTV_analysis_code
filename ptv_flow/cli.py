@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 
 from ptv_flow.inspect import inspect_flow_gui
-from ptv_flow.postprocess import TemporalAverageVolume, temporal_average_volume
+from ptv_flow.postprocess import (
+    TemporalAverageVolume,
+    apply_valid_fraction_to_average,
+    temporal_average_volume,
+)
 from ptv_flow.reader import DEFAULT_FILE, FlowDataset
 from ptv_flow.visualize import animate_z_plane, show_temporal_average_plane
 
@@ -112,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="visualize one x, y, or z plane from a temporal-average output file",
     )
     parser.add_argument(
+        "--apply-valid-fraction",
+        type=float,
+        default=None,
+        help="apply a valid-fraction cutoff to an existing temporal-average file",
+    )
+    parser.add_argument(
         "--quantity",
         choices=("speed", "u", "v", "w"),
         default="speed",
@@ -168,6 +178,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.apply_valid_fraction is not None:
+        if args.output is None:
+            raise SystemExit("--apply-valid-fraction requires --output.")
+        try:
+            apply_valid_fraction_to_average(
+                source=args.path,
+                output=args.output,
+                min_valid_fraction=args.apply_valid_fraction,
+                overwrite=args.overwrite,
+            )
+        except FileExistsError as exc:
+            raise SystemExit(str(exc)) from exc
+        return
+
     if args.average_plane:
         plane_value = args.z if args.plane_value is None and args.plane == "z" else args.plane_value
         if plane_value is None:
@@ -180,6 +204,7 @@ def main() -> None:
                 quantity=args.quantity,
                 quiver_step=args.quiver_step,
                 save=args.save,
+                min_valid_fraction=args.min_valid_fraction,
             )
         return
 
@@ -224,6 +249,7 @@ def main() -> None:
                     initial_frame=args.frame,
                     initial_z=args.z,
                     quiver_step=args.quiver_step,
+                    min_valid_fraction=args.min_valid_fraction,
                 )
             else:
                 with TemporalAverageVolume(args.average_file) as average:
@@ -233,6 +259,7 @@ def main() -> None:
                         initial_frame=args.frame,
                         initial_z=args.z,
                         quiver_step=args.quiver_step,
+                        min_valid_fraction=args.min_valid_fraction,
                     )
         else:
             print(flow.describe())

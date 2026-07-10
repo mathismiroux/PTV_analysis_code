@@ -72,6 +72,45 @@ def _temporal_average_quantity(
     raise ValueError("quantity must be one of 'speed', 'u', 'v', or 'w'")
 
 
+def _min_valid_count(volume: TemporalAverageVolume, min_valid_fraction: float) -> int:
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+    if min_valid_fraction == 0.0:
+        return 1
+    if "input_shape_time_z_y_x" not in volume._file.attrs:
+        raise KeyError(
+            "Missing input_shape_time_z_y_x metadata; cannot apply "
+            "min_valid_fraction while visualizing."
+        )
+    n_times = int(volume._file.attrs["input_shape_time_z_y_x"][0])
+    return int(np.ceil(min_valid_fraction * n_times))
+
+
+def _apply_plane_valid_fraction(
+    plane: dict[str, np.ndarray | float | int],
+    scalar: np.ndarray,
+    quantity: str,
+    min_valid_count: int,
+) -> np.ndarray:
+    if min_valid_count <= 1:
+        return scalar
+
+    scalar = scalar.astype(float, copy=True)
+    if quantity == "speed":
+        counts = [plane.get(f"{name}_count") for name in ("u", "v", "w")]
+        if all(count is not None for count in counts):
+            valid = np.ones(scalar.shape, dtype=bool)
+            for count in counts:
+                valid &= count >= min_valid_count
+            scalar[~valid] = np.nan
+        return scalar
+
+    count = plane.get(f"{quantity}_count")
+    if count is not None:
+        scalar[count < min_valid_count] = np.nan
+    return scalar
+
+
 def animate_z_plane(
     flow: FlowDataset,
     z_value: float = 0.0,
@@ -163,12 +202,20 @@ def show_temporal_average_plane(
     quantity: str = "speed",
     quiver_step: int = 3,
     save: Path | None = None,
+    min_valid_fraction: float = 0.0,
 ) -> None:
     """Show one x, y, or z plane from a temporal-average volume."""
 
     plane_index = volume.nearest_index(plane_axis, plane_value)
     plane = volume.read_plane(plane_axis, plane_index)
     scalar, colorbar_label, cmap = _temporal_average_quantity(plane, quantity)
+    min_valid_count = _min_valid_count(volume, min_valid_fraction)
+    scalar = _apply_plane_valid_fraction(
+        plane,
+        scalar,
+        quantity=quantity,
+        min_valid_count=min_valid_count,
+    )
 
     fig, ax = plt.subplots(figsize=(9, 7), constrained_layout=True)
     image, _, _ = _draw_xy_vector_plane(
@@ -202,6 +249,11 @@ def show_temporal_average_plane(
         f"({plane_axis}_index={plane['index']}, "
         f"nearest to requested {plane_axis}={plane_value:g})."
     )
+    if min_valid_fraction > 0.0:
+        print(
+            f"Display mask: min_valid_fraction={min_valid_fraction:g} "
+            f"(min_count={min_valid_count})."
+        )
 
     if save is not None:
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +269,7 @@ def show_temporal_average_z_plane(
     quantity: str = "speed",
     quiver_step: int = 3,
     save: Path | None = None,
+    min_valid_fraction: float = 0.0,
 ) -> None:
     """Backward-compatible wrapper for z-plane visualization."""
 
@@ -227,4 +280,5 @@ def show_temporal_average_z_plane(
         quantity=quantity,
         quiver_step=quiver_step,
         save=save,
+        min_valid_fraction=min_valid_fraction,
     )

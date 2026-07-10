@@ -6,6 +6,8 @@ import pytest
 
 from ptv_flow.inspect import (
     CellInspection,
+    _apply_inspector_valid_mask,
+    _rejected_overlay_rgba,
     component_mean_ignoring_zero,
     format_cell_inspection,
     inspect_cell,
@@ -20,15 +22,53 @@ def test_component_mean_ignores_exact_zeros():
     mean = component_mean_ignoring_zero(np.array([0.0, 2.0, 4.0, 0.0]))
     assert mean.mean == 3.0
     assert mean.count == 2
+    assert mean.accepted
 
     empty = component_mean_ignoring_zero(np.array([0.0, 0.0]))
     assert np.isnan(empty.mean)
     assert empty.count == 0
+    assert not empty.accepted
+
+    rejected = component_mean_ignoring_zero(
+        np.array([0.0, 2.0, 4.0, 0.0]), min_valid_count=3
+    )
+    assert np.isnan(rejected.mean)
+    assert rejected.count == 2
+    assert not rejected.accepted
 
 
 def test_nearest_index():
     assert nearest_index(np.array([10.0, 20.0, 30.0]), 26.0) == 2
     assert nearest_index(np.array([10.0, 20.0, 30.0]), 14.0) == 0
+
+
+def test_apply_inspector_valid_mask_marks_rejected_cells_without_changing_speed():
+    speed = np.array([[1.0, 2.0]])
+    u = np.array([[3.0, 4.0]])
+    v = np.array([[5.0, 6.0]])
+    counts = (
+        np.array([[10, 8]]),
+        np.array([[10, 10]]),
+        np.array([[10, 10]]),
+    )
+
+    display_speed, display_u, display_v, accepted = _apply_inspector_valid_mask(
+        speed,
+        u,
+        v,
+        counts,
+        min_valid_count=9,
+    )
+
+    np.testing.assert_array_equal(accepted, [[True, False]])
+    np.testing.assert_array_equal(display_speed, [[1.0, 2.0]])
+    np.testing.assert_array_equal(display_u, [[3.0, 0.0]])
+    np.testing.assert_array_equal(display_v, [[5.0, 0.0]])
+
+    overlay = _rejected_overlay_rgba(accepted)
+    assert overlay.shape == (1, 2, 4)
+    assert overlay[0, 0, 3] == 0.0
+    assert overlay[0, 1, 3] > 0.0
 
 
 def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
@@ -63,12 +103,20 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
         assert cell.average_u is not None
         assert cell.average_u.mean == pytest.approx(cell.computed_u.mean)
         assert cell.average_u.count == cell.computed_u.count
+        assert cell.average_u.accepted
 
-        report = format_cell_inspection(cell, raw_label="tiny_flow.nc")
+        report = format_cell_inspection(
+            cell,
+            raw_label="tiny_flow.nc",
+            min_valid_count=1,
+            n_times=flow.n_times,
+        )
         assert "Raw value at selected frame" in report
         assert "raw source: tiny_flow.nc" in report
+        assert "min valid count: 1 / 4" in report
         assert "Selected-voxel temporal mean computed on demand" in report
         assert "source: raw time series at this one cell only" in report
+        assert "accepted" in report
         assert "Value stored in average file" in report
 
 

@@ -15,6 +15,7 @@ from ptv_flow.visualize import _draw_xy_vector_plane
 class ComponentMean:
     mean: float
     count: int
+    accepted: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,12 +44,53 @@ def nearest_index(values: np.ndarray, value: float) -> int:
     return int(np.nanargmin(np.abs(values - value)))
 
 
-def component_mean_ignoring_zero(series: np.ndarray) -> ComponentMean:
+def component_mean_ignoring_zero(
+    series: np.ndarray, min_valid_count: int = 1
+) -> ComponentMean:
     valid = series != 0.0
     count = int(valid.sum())
-    if count == 0:
-        return ComponentMean(mean=float("nan"), count=0)
-    return ComponentMean(mean=float(series[valid].mean()), count=count)
+    if count == 0 or count < min_valid_count:
+        return ComponentMean(mean=float("nan"), count=count, accepted=False)
+    return ComponentMean(mean=float(series[valid].mean()), count=count, accepted=True)
+
+
+def _valid_counts_for_z_plane(
+    flow: FlowDataset, z_index: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        (flow._file["u"][:, z_index, :, :] != 0.0).sum(axis=0),
+        (flow._file["v"][:, z_index, :, :] != 0.0).sum(axis=0),
+        (flow._file["w"][:, z_index, :, :] != 0.0).sum(axis=0),
+    )
+
+
+def _apply_inspector_valid_mask(
+    speed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    counts: tuple[np.ndarray, np.ndarray, np.ndarray],
+    min_valid_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if min_valid_count <= 1:
+        accepted = np.ones(speed.shape, dtype=bool)
+        return speed, u, v, accepted
+
+    u_count, v_count, w_count = counts
+    accepted = (
+        (u_count >= min_valid_count)
+        & (v_count >= min_valid_count)
+        & (w_count >= min_valid_count)
+    )
+    display_speed = speed
+    display_u = np.where(accepted, u, 0.0)
+    display_v = np.where(accepted, v, 0.0)
+    return display_speed, display_u, display_v, accepted
+
+
+def _rejected_overlay_rgba(accepted: np.ndarray) -> np.ndarray:
+    overlay = np.zeros((*accepted.shape, 4), dtype=float)
+    overlay[~accepted] = (0.95, 0.10, 0.10, 0.38)
+    return overlay
 
 
 def validate_average_compatible(
@@ -82,6 +124,7 @@ def inspect_cell(
     y_index: int,
     x_index: int,
     average: TemporalAverageVolume | None = None,
+    min_valid_count: int = 1,
 ) -> CellInspection:
     if time_index < 0:
         time_index += flow.n_times
@@ -105,27 +148,60 @@ def inspect_cell(
     average_w = None
     if average is not None:
         average_u = ComponentMean(
-            mean=float(average._file["u_mean"][z_index, y_index, x_index]),
+            mean=(
+                float(average._file["u_mean"][z_index, y_index, x_index])
+                if "u_count" not in average._file
+                or int(average._file["u_count"][z_index, y_index, x_index])
+                >= min_valid_count
+                else float("nan")
+            ),
             count=(
                 int(average._file["u_count"][z_index, y_index, x_index])
                 if "u_count" in average._file
                 else -1
             ),
+            accepted=(
+                "u_count" not in average._file
+                or int(average._file["u_count"][z_index, y_index, x_index])
+                >= min_valid_count
+            ),
         )
         average_v = ComponentMean(
-            mean=float(average._file["v_mean"][z_index, y_index, x_index]),
+            mean=(
+                float(average._file["v_mean"][z_index, y_index, x_index])
+                if "v_count" not in average._file
+                or int(average._file["v_count"][z_index, y_index, x_index])
+                >= min_valid_count
+                else float("nan")
+            ),
             count=(
                 int(average._file["v_count"][z_index, y_index, x_index])
                 if "v_count" in average._file
                 else -1
             ),
+            accepted=(
+                "v_count" not in average._file
+                or int(average._file["v_count"][z_index, y_index, x_index])
+                >= min_valid_count
+            ),
         )
         average_w = ComponentMean(
-            mean=float(average._file["w_mean"][z_index, y_index, x_index]),
+            mean=(
+                float(average._file["w_mean"][z_index, y_index, x_index])
+                if "w_count" not in average._file
+                or int(average._file["w_count"][z_index, y_index, x_index])
+                >= min_valid_count
+                else float("nan")
+            ),
             count=(
                 int(average._file["w_count"][z_index, y_index, x_index])
                 if "w_count" in average._file
                 else -1
+            ),
+            accepted=(
+                "w_count" not in average._file
+                or int(average._file["w_count"][z_index, y_index, x_index])
+                >= min_valid_count
             ),
         )
 
@@ -143,13 +219,16 @@ def inspect_cell(
         raw_w=raw_w,
         raw_speed=float(np.sqrt(raw_u * raw_u + raw_v * raw_v + raw_w * raw_w)),
         computed_u=component_mean_ignoring_zero(
-            flow._file["u"][:, z_index, y_index, x_index]
+            flow._file["u"][:, z_index, y_index, x_index],
+            min_valid_count=min_valid_count,
         ),
         computed_v=component_mean_ignoring_zero(
-            flow._file["v"][:, z_index, y_index, x_index]
+            flow._file["v"][:, z_index, y_index, x_index],
+            min_valid_count=min_valid_count,
         ),
         computed_w=component_mean_ignoring_zero(
-            flow._file["w"][:, z_index, y_index, x_index]
+            flow._file["w"][:, z_index, y_index, x_index],
+            min_valid_count=min_valid_count,
         ),
         average_u=average_u,
         average_v=average_v,
@@ -157,10 +236,22 @@ def inspect_cell(
     )
 
 
-def format_cell_inspection(cell: CellInspection, raw_label: str = "raw file") -> str:
+def _format_mean(name: str, value: ComponentMean) -> str:
+    status = "accepted" if value.accepted else "rejected"
+    return f"  {name}_mean={value.mean:.9g}  count={value.count}  {status}"
+
+
+def format_cell_inspection(
+    cell: CellInspection,
+    raw_label: str = "raw file",
+    min_valid_count: int = 1,
+    n_times: int | None = None,
+) -> str:
     lines = [
         "Inspector mode",
         f"  raw source: {raw_label}",
+        f"  min valid count: {min_valid_count}"
+        + (f" / {n_times}" if n_times is not None else ""),
         "",
         "Selected cell",
         f"  indices: t={cell.time_index}, z={cell.z_index}, "
@@ -176,18 +267,18 @@ def format_cell_inspection(cell: CellInspection, raw_label: str = "raw file") ->
         "",
         "Selected-voxel temporal mean computed on demand",
         "  source: raw time series at this one cell only",
-        f"  u_mean={cell.computed_u.mean:.9g}  count={cell.computed_u.count}",
-        f"  v_mean={cell.computed_v.mean:.9g}  count={cell.computed_v.count}",
-        f"  w_mean={cell.computed_w.mean:.9g}  count={cell.computed_w.count}",
+        _format_mean("u", cell.computed_u),
+        _format_mean("v", cell.computed_v),
+        _format_mean("w", cell.computed_w),
     ]
     if cell.average_u is not None and cell.average_v is not None and cell.average_w is not None:
         lines.extend(
             [
                 "",
                 "Value stored in average file",
-                f"  u_mean={cell.average_u.mean:.9g}  count={cell.average_u.count}",
-                f"  v_mean={cell.average_v.mean:.9g}  count={cell.average_v.count}",
-                f"  w_mean={cell.average_w.mean:.9g}  count={cell.average_w.count}",
+                _format_mean("u", cell.average_u),
+                _format_mean("v", cell.average_v),
+                _format_mean("w", cell.average_w),
             ]
         )
     else:
@@ -207,12 +298,15 @@ def inspect_flow_gui(
     initial_frame: int = 0,
     initial_z: float = 0.0,
     quiver_step: int = 3,
+    min_valid_fraction: float = 0.0,
 ) -> None:
     """Interactive visual inspection of raw values and temporal means."""
 
     if average is not None:
         validate_average_compatible(flow, average)
     raw_label = flow.path.name
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
 
     frame_index = int(np.clip(initial_frame, 0, flow.n_times - 1))
     z_index = flow.nearest_z_index(initial_z)
@@ -225,8 +319,9 @@ def inspect_flow_gui(
     fig = plt.figure(figsize=(13, 8), constrained_layout=False)
     ax = fig.add_axes((0.06, 0.20, 0.58, 0.72))
     text_ax = fig.add_axes((0.68, 0.20, 0.29, 0.72))
-    frame_ax = fig.add_axes((0.12, 0.10, 0.45, 0.03))
-    z_ax = fig.add_axes((0.12, 0.05, 0.45, 0.03))
+    frame_ax = fig.add_axes((0.18, 0.115, 0.39, 0.03))
+    z_ax = fig.add_axes((0.18, 0.07, 0.39, 0.03))
+    valid_ax = fig.add_axes((0.18, 0.025, 0.39, 0.03))
 
     image, quiver, q_slice = _draw_xy_vector_plane(
         ax=ax,
@@ -241,6 +336,13 @@ def inspect_flow_gui(
     )
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label("Velocity magnitude")
+    rejected_overlay = ax.imshow(
+        _rejected_overlay_rgba(np.ones_like(first.speed, dtype=bool)),
+        extent=image.get_extent(),
+        origin="lower",
+        interpolation="nearest",
+        zorder=image.get_zorder() + 0.5,
+    )
     marker = ax.plot(
         [x_values[selected_x_index]],
         [y_values[selected_y_index]],
@@ -280,18 +382,46 @@ def inspect_flow_gui(
         valinit=z_index,
         valstep=1,
     )
+    valid_slider = Slider(
+        valid_ax,
+        "min valid frac",
+        0.0,
+        1.0,
+        valinit=min_valid_fraction,
+        valstep=0.01,
+    )
+
+    def current_min_valid_count() -> int:
+        return max(int(np.ceil(float(valid_slider.val) * flow.n_times)), 1)
+
+    counts_by_z_index: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    def current_counts() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if z_index not in counts_by_z_index:
+            counts_by_z_index[z_index] = _valid_counts_for_z_plane(flow, z_index)
+        return counts_by_z_index[z_index]
 
     def refresh() -> None:
         nonlocal frame_index, z_index
         frame_index = int(frame_slider.val)
         z_index = int(z_slider.val)
+        min_valid_count = current_min_valid_count()
         plane = flow.read_z_plane(frame_index, z_index)
-        image.set_data(plane.speed)
-        quiver.set_UVC(plane.u[q_slice], plane.v[q_slice])
+        display_speed, display_u, display_v, accepted = _apply_inspector_valid_mask(
+            plane.speed,
+            plane.u,
+            plane.v,
+            current_counts(),
+            min_valid_count,
+        )
+        image.set_data(display_speed)
+        rejected_overlay.set_data(_rejected_overlay_rgba(accepted))
+        quiver.set_UVC(display_u[q_slice], display_v[q_slice])
         marker.set_data([x_values[selected_x_index]], [y_values[selected_y_index]])
         title.set_text(
             f"Raw frame={frame_index}, t={plane.time:.6g}, "
-            f"z={plane.z_value:.6g} (z_index={z_index})"
+            f"z={plane.z_value:.6g} (z_index={z_index}), "
+            f"shown accepted={int(accepted.sum())}/{accepted.size}"
         )
         cell = inspect_cell(
             flow,
@@ -300,8 +430,16 @@ def inspect_flow_gui(
             y_index=selected_y_index,
             x_index=selected_x_index,
             average=average,
+            min_valid_count=min_valid_count,
         )
-        info.set_text(format_cell_inspection(cell, raw_label=raw_label))
+        info.set_text(
+            format_cell_inspection(
+                cell,
+                raw_label=raw_label,
+                min_valid_count=min_valid_count,
+                n_times=flow.n_times,
+            )
+        )
         fig.canvas.draw_idle()
 
     def on_click(event) -> None:
@@ -314,6 +452,7 @@ def inspect_flow_gui(
 
     frame_slider.on_changed(lambda _value: refresh())
     z_slider.on_changed(lambda _value: refresh())
+    valid_slider.on_changed(lambda _value: refresh())
     fig.canvas.mpl_connect("button_press_event", on_click)
 
     print(f"Reading NetCDF file: {flow.path.resolve()}")
@@ -321,6 +460,10 @@ def inspect_flow_gui(
         print(f"Reading average file: {average.path.resolve()}")
     else:
         print("Raw-only inspection: no average file comparison active.")
+    print(
+        f"Inspector min_valid_fraction={min_valid_fraction:g} "
+        f"(initial min_count={current_min_valid_count()})."
+    )
     print("Click a cell to inspect raw values and on-demand selected-voxel means.")
     refresh()
     plt.show()

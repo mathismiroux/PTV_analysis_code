@@ -3,7 +3,11 @@ from __future__ import annotations
 import h5py
 import numpy as np
 
-from ptv_flow.postprocess import TemporalAverageVolume, temporal_average_volume
+from ptv_flow.postprocess import (
+    TemporalAverageVolume,
+    apply_valid_fraction_to_average,
+    temporal_average_volume,
+)
 from ptv_flow.reader import FlowDataset
 
 
@@ -161,6 +165,41 @@ def test_temporal_average_min_valid_fraction_discards_sparse_values(tmp_path):
         np.testing.assert_array_equal(out["v_count"][:], [[[4]]])
         np.testing.assert_array_equal(out["w_count"][:], [[[5]]])
         assert np.isnan(out["speed_from_mean"][0, 0, 0])
+
+
+def test_apply_valid_fraction_to_existing_average(tmp_path):
+    raw = tmp_path / "sparse.nc"
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(5, dtype=np.float32))
+        h5.create_dataset("z", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("y", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("x", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset(
+            "u", data=np.array([[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[0.0]]], [[[0.0]]]])
+        )
+        h5.create_dataset(
+            "v", data=np.array([[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[4.0]]], [[[0.0]]]])
+        )
+        h5.create_dataset(
+            "w", data=np.array([[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[4.0]]], [[[5.0]]]])
+        )
+
+    average = tmp_path / "mean.nc"
+    filtered = tmp_path / "mean_80.nc"
+    with FlowDataset(raw) as flow:
+        temporal_average_volume(flow, average, chunk_size=2)
+
+    apply_valid_fraction_to_average(average, filtered, min_valid_fraction=0.8)
+
+    with h5py.File(average, "r") as original, h5py.File(filtered, "r") as out:
+        assert original["u_mean"][0, 0, 0] == 2.0
+        assert np.isnan(out["u_mean"][0, 0, 0])
+        assert out["v_mean"][0, 0, 0] == 2.5
+        assert out["w_mean"][0, 0, 0] == 3.0
+        assert out.attrs["derived_operation"] == "apply_valid_fraction_to_average"
+        assert out.attrs["derived_from_file"].endswith("mean.nc")
+        assert out.attrs["min_valid_count"] == 4
+        assert out["provenance"].attrs["derived_from_file"].endswith("mean.nc")
 
 
 def test_temporal_average_volume_reader(tiny_flow_path, tmp_path):

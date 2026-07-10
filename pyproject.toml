@@ -20,3 +20,6 @@ ptv-flow = "ptv_flow.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["ptv_flow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

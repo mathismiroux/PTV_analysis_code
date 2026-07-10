@@ -38,31 +38,162 @@ Read a specific file:
 python main.py "U:\FWExp data\DATA_2025_02_OJF__FW_PTV\postprocessed PTV data v2\Static_3.5D__b96.nc"
 ```
 
-## Animate A z Plane
+## Development Setup
 
-Show the nearest available plane to `z=0` at 40 fps:
-
-```powershell
-python main.py "U:\FWExp data\DATA_2025_02_OJF__FW_PTV\postprocessed PTV data v2\Static_3.5D__b96.nc" --animate --fps 40
-```
-
-The visualization shows:
-
-- velocity magnitude as the color field
-- in-plane `(u, v)` velocity vectors as arrows
-- the nearest available `z` coordinate in the title
-
-Useful options:
+Install the development dependencies to run tests and pre-commit hooks:
 
 ```powershell
-python main.py "path\to\file.nc" --animate --z 0 --fps 40
-python main.py "path\to\file.nc" --animate --start 0 --stop 400 --step 1
-python main.py "path\to\file.nc" --animate --quiver-step 2
-python main.py "path\to\file.nc" --animate --save outputs\z0_animation.gif
+python -m pip install -r requirements-dev.txt
 ```
 
-GIF export works with the default dependencies. MP4 export needs an FFmpeg
-installation and a small writer configuration change.
+Run the test suite manually:
+
+```powershell
+python -m pytest
+```
+
+Install the pre-commit hook once per clone:
+
+```powershell
+pre-commit install
+```
+
+After that, `python -m py_compile ...` and `python -m pytest` run automatically
+before each commit.
+
+The tests use `tests\data\tiny_flow.nc`, a 13 KB fixture extracted from the
+local `Static_3.5D__b128f.nc` file. To regenerate it:
+
+```powershell
+python scripts\extract_test_fixture.py
+```
+
+## Command Reference
+
+All commands use the same basic form:
+
+```powershell
+python main.py "path\to\file.nc" [options]
+```
+
+If no path is provided, the code uses `Static_3.5D__b128f.nc` in the repository
+root.
+
+### Inspect A Raw Time-Series File
+
+Print file metadata, grid dimensions, coordinate ranges, voxel size, and one
+frame summary:
+
+```powershell
+python main.py "path\to\raw_file.nc"
+python main.py "path\to\raw_file.nc" --frame 100
+```
+
+Options:
+
+- `--frame N`: choose the time index used for the printed velocity statistics.
+
+### Animate A Raw Time-Series File
+
+Animate one `z` plane from the raw 4D time series:
+
+```powershell
+python main.py "path\to\raw_file.nc" --animate --z 0 --fps 40
+```
+
+The visualization shows velocity magnitude as the color field and in-plane
+`(u, v)` velocity vectors as arrows. GIF export works with the default
+dependencies; MP4 export needs FFmpeg.
+
+Options:
+
+- `--z VALUE`: requested `z` plane. The nearest available plane is used.
+- `--fps VALUE`: animation frame rate.
+- `--start N`: first time index to animate.
+- `--stop N`: one-past-last time index to animate.
+- `--step N`: time-index stride. Use `--step 2` to animate every other frame.
+- `--quiver-step N`: arrow spacing. Larger values draw fewer arrows.
+- `--save path.gif`: save a GIF instead of opening an interactive window.
+
+### Inspect Raw Values And Averages
+
+Open an interactive inspection GUI for a raw time-series file:
+
+```powershell
+python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0
+```
+
+In the GUI, use the sliders to choose the frame and `z` plane. Click a cell in
+the slice to inspect:
+
+- the selected indices and coordinates
+- raw `u`, `v`, `w`, and speed at the selected frame
+- selected-voxel temporal mean computed on demand from the raw time series
+
+The inspector does not compute a full averaged volume. It only reads the time
+series for the one clicked voxel, which is why this value appears quickly.
+
+If you already computed a temporal-average output file, pass it too:
+
+```powershell
+python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0 --compare-average --average-file outputs\temporal_mean.nc
+```
+
+With `--compare-average --average-file`, the side panel also shows the stored
+`u_mean`, `v_mean`, `w_mean`, and counts from the postprocessed file so you can
+compare them with the value computed from the raw series.
+
+The comparison file must have the same grid shape and `x`, `y`, `z`
+coordinates as the raw file. This prevents accidentally comparing, for example,
+a `b128` raw file with a `b96` temporal average.
+
+### Compute A Temporal Average
+
+Create a 3D mean velocity volume from a raw 4D time series. Exact-zero values
+are ignored in the average.
+
+```powershell
+python main.py "path\to\raw_file.nc" --temporal-average --output outputs\temporal_mean.nc
+python main.py "path\to\raw_file.nc" --temporal-average --min-valid-fraction 0.8 --output outputs\temporal_mean_80pct.nc
+```
+
+Options:
+
+- `--output path.nc`: output file for the averaged volume.
+- `--chunk-size N`: number of time steps read at once. Larger values can be
+  faster but use more memory.
+- `--zero-mask component`: default. Ignore exact zeros independently for
+  `u`, `v`, and `w`.
+- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
+  exactly zero.
+- `--min-valid-fraction F`: discard averaged values with fewer than this
+  fraction of valid time samples. Use `--min-valid-fraction 0.8` to require
+  80 percent valid data at each voxel/component.
+
+The output file contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
+`u_count`, `v_count`, `w_count`, and `speed_from_mean`.
+
+### Visualize A Temporal-Average Volume
+
+Plot one `x`, `y`, or `z` plane from a postprocessed temporal-average file:
+
+```powershell
+python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0
+python main.py outputs\temporal_mean.nc --average-plane --plane x --plane-value 0 --quantity u
+python main.py outputs\temporal_mean.nc --average-plane --plane y --plane-value 0 --quantity speed
+python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --save outputs\temporal_mean_z0.png
+```
+
+Options:
+
+- `--plane {x,y,z}`: slice direction. The selected coordinate is held
+  constant.
+- `--plane-value VALUE`: requested coordinate value for the selected plane.
+  The nearest available coordinate is used.
+- `--quantity {speed,u,v,w}`: scalar field shown as the color background.
+  `speed` is the 3D velocity magnitude from the mean vector.
+- `--quiver-step N`: arrow spacing. Larger values draw fewer arrows.
+- `--save path.png`: save the figure instead of opening an interactive window.
 
 ## Optional Editable Install
 
@@ -91,10 +222,22 @@ python main.py "path\to\file.nc" --frame 0
 ├── main.py                 # Backward-compatible command-line entry point
 ├── ptv_flow/
 │   ├── cli.py              # Command-line arguments
+│   ├── inspect.py          # Interactive raw/average cell inspector
+│   ├── postprocess.py      # Temporal averaging and averaged-volume reader
 │   ├── reader.py           # Lazy NetCDF/HDF5 reader
 │   └── visualize.py        # Matplotlib animation code
+├── scripts/
+│   └── extract_test_fixture.py
+├── tests/
+│   ├── data/tiny_flow.nc   # Small committed fixture for unit tests
+│   ├── test_cli.py
+│   ├── test_inspect.py
+│   ├── test_postprocess.py
+│   └── test_reader.py
 ├── requirements.txt        # Fast dependency install
+├── requirements-dev.txt    # Test and pre-commit dependencies
 ├── pyproject.toml          # Optional editable/package install
+├── .pre-commit-config.yaml # Commit-time checks
 ├── .gitattributes          # Stable Python line endings
 └── .gitignore              # Keeps data, caches, and exports out of git
 ```

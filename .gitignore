@@ -1,6 +1,7 @@
 # Local data files are large and should not be committed.
 *.nc
-data/
+/data/
+!tests/data/*.nc
 
 # Python environments and generated files.
 .venv/

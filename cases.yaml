@@ -1,0 +1,105 @@
+defaults: &defaults
+  downstream_distance: 3.5D
+  u_inf: 4.0
+  rotor_diameter: 1.2
+  rotor_frequency_hz: 8.0
+  blade_passing_frequency_hz: 24.0
+  files:
+    velocity: null
+    vorticity: null
+    q_criterion: null
+    phase_signal: null
+
+cases:
+  static_x3p5d:
+    <<: *defaults
+    label: "Static baseline"
+    motion_type: static
+    frequency_hz: null
+    reduced_frequency: null
+    amplitude: null
+    files:
+      velocity: Static_3.5D__b128f.nc
+      vorticity: null
+      q_criterion: null
+      phase_signal: null
+
+  surge_st06_x3p5d:
+    <<: *defaults
+    label: "Surge St=0.6"
+    motion_type: surge
+    frequency_hz: 2.0
+    reduced_frequency: 0.6
+    amplitude: full
+
+  pitch_st06_x3p5d:
+    <<: *defaults
+    label: "Pitch St=0.6"
+    motion_type: pitch
+    frequency_hz: 2.0
+    reduced_frequency: 0.6
+    amplitude: full
+
+  surge_st15_x3p5d:
+    <<: *defaults
+    label: "Surge St=1.5"
+    motion_type: surge
+    frequency_hz: 5.0
+    reduced_frequency: 1.5
+    amplitude: full
+
+  pitch_st15_x3p5d:
+    <<: *defaults
+    label: "Pitch St=1.5"
+    motion_type: pitch
+    frequency_hz: 5.0
+    reduced_frequency: 1.5
+    amplitude: full
+
+  surge_st06_reduced_amplitude_x3p5d:
+    <<: *defaults
+    label: "Surge St=0.6 reduced amplitude"
+    motion_type: surge
+    frequency_hz: 2.0
+    reduced_frequency: 0.6
+    amplitude: reduced
+
+  pitch_st06_reduced_amplitude_x3p5d:
+    <<: *defaults
+    label: "Pitch St=0.6 reduced amplitude"
+    motion_type: pitch
+    frequency_hz: 2.0
+    reduced_frequency: 0.6
+    amplitude: reduced
+
+  surge_st15_reduced_amplitude_x3p5d:
+    <<: *defaults
+    label: "Surge St=1.5 reduced amplitude"
+    motion_type: surge
+    frequency_hz: 5.0
+    reduced_frequency: 1.5
+    amplitude: reduced
+
+  pitch_st15_reduced_amplitude_x3p5d:
+    <<: *defaults
+    label: "Pitch St=1.5 reduced amplitude"
+    motion_type: pitch
+    frequency_hz: 5.0
+    reduced_frequency: 1.5
+    amplitude: reduced
+
+  wave_realistic_1_x3p5d:
+    <<: *defaults
+    label: "Realistic wave-induced motion 1"
+    motion_type: wave
+    frequency_hz: null
+    reduced_frequency: null
+    amplitude: realistic
+
+  wave_realistic_2_x3p5d:
+    <<: *defaults
+    label: "Realistic wave-induced motion 2"
+    motion_type: wave
+    frequency_hz: null
+    reduced_frequency: null
+    amplitude: realistic

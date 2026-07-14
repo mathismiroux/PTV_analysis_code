@@ -1,0 +1,33 @@
+cases:
+  tiny_static_x3p5d:
+    label: "Tiny static fixture"
+    motion_type: static
+    downstream_distance: 3.5D
+    frequency_hz: null
+    reduced_frequency: null
+    amplitude: null
+    u_inf: 4.0
+    rotor_diameter: 1.2
+    rotor_frequency_hz: 8.0
+    blade_passing_frequency_hz: 24.0
+    files:
+      velocity: tiny_flow.nc
+      vorticity: null
+      q_criterion: null
+      phase_signal: null
+
+  missing_velocity_x3p5d:
+    label: "Missing velocity"
+    motion_type: static
+    downstream_distance: 3.5D
+    u_inf: 4.0
+    files:
+      velocity: null
+
+  missing_u_inf_x3p5d:
+    label: "Missing free-stream velocity"
+    motion_type: static
+    downstream_distance: 3.5D
+    u_inf: null
+    files:
+      velocity: tiny_flow.nc

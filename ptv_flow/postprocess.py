@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Mapping
 import uuid
 
 import h5py
@@ -171,6 +172,8 @@ def temporal_average_volume(
     zero_mask: str = "component",
     min_valid_fraction: float = 0.0,
     overwrite: bool = False,
+    u_inf: float | None = None,
+    metadata: Mapping[str, str | float] | None = None,
 ) -> Path:
     """Compute temporal mean velocity fields while ignoring exact zeros.
 
@@ -191,6 +194,10 @@ def temporal_average_volume(
         with fewer valid samples are set to NaN. Use 0.8 for an 80% cutoff.
     overwrite:
         Replace an existing output file. By default existing files are refused.
+    u_inf:
+        Free-stream velocity used to store wake-deficit products.
+    metadata:
+        Optional case metadata stored as file attributes.
     """
 
     if chunk_size <= 0:
@@ -258,10 +265,20 @@ def temporal_average_volume(
     speed_from_mean = np.sqrt(
         means["u"] * means["u"] + means["v"] * means["v"] + means["w"] * means["w"]
     )
+    wake_deficit = None
+    wake_mask_u09 = None
+    if u_inf is not None:
+        if u_inf == 0.0:
+            raise ValueError("u_inf must be non-zero")
+        wake_deficit = (float(u_inf) - means["u"]) / float(u_inf)
+        wake_mask_u09 = means["u"] / float(u_inf) < 0.9
 
     try:
         with h5py.File(temporary_output, "w") as out:
             source_path = flow.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
             out.attrs["source_file"] = str(source_path)
             out.attrs["source_file_name"] = source_path.name
             out.attrs["source_file_parent"] = str(source_path.parent)
@@ -274,6 +291,8 @@ def temporal_average_volume(
             out.attrs["min_valid_fraction"] = min_valid_fraction
             out.attrs["min_valid_count"] = min_valid_count
             out.attrs["input_shape_time_z_y_x"] = flow.shape
+            if u_inf is not None:
+                out.attrs["u_inf"] = float(u_inf)
 
             provenance = out.create_group("provenance")
             provenance.attrs["source_file"] = str(source_path)
@@ -283,6 +302,11 @@ def temporal_average_volume(
             provenance.attrs["chunk_size"] = chunk_size
             provenance.attrs["min_valid_fraction"] = min_valid_fraction
             provenance.attrs["min_valid_count"] = min_valid_count
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
+            if u_inf is not None:
+                provenance.attrs["u_inf"] = float(u_inf)
 
             for name in COORDINATES:
                 if name == "t":
@@ -308,6 +332,19 @@ def temporal_average_volume(
                 compression="gzip",
                 compression_opts=4,
             )
+            if wake_deficit is not None and wake_mask_u09 is not None:
+                out.create_dataset(
+                    "wake_deficit",
+                    data=wake_deficit,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    "wake_mask_u09",
+                    data=wake_mask_u09,
+                    compression="gzip",
+                    compression_opts=4,
+                )
         temporary_output.replace(output)
     except Exception:
         if temporary_output.exists():
@@ -461,6 +498,7 @@ def turbulent_kinetic_energy(
     chunk_size: int = 50,
     zero_mask: str = "component",
     overwrite: bool = False,
+    metadata: Mapping[str, str | float] | None = None,
 ) -> Path:
     """Compute turbulent kinetic energy from raw velocities and mean velocities.
 
@@ -548,6 +586,9 @@ def turbulent_kinetic_energy(
         with h5py.File(temporary_output, "w") as out:
             source_path = flow.path.resolve()
             mean_path = mean.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
             out.attrs["source_file"] = str(source_path)
             out.attrs["source_file_name"] = source_path.name
             out.attrs["source_file_parent"] = str(source_path.parent)
@@ -565,6 +606,9 @@ def turbulent_kinetic_energy(
             out.attrs["input_shape_time_z_y_x"] = flow.shape
 
             provenance = out.create_group("provenance")
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
             provenance.attrs["source_file"] = str(source_path)
             provenance.attrs["mean_file"] = str(mean_path)
             provenance.attrs["created_utc"] = out.attrs["created_utc"]
@@ -632,6 +676,7 @@ def reynolds_stresses(
     chunk_size: int = 50,
     zero_mask: str = "component",
     overwrite: bool = False,
+    metadata: Mapping[str, str | float] | None = None,
 ) -> Path:
     """Compute selected Reynolds stress components from raw and mean velocities.
 
@@ -728,6 +773,9 @@ def reynolds_stresses(
         with h5py.File(temporary_output, "w") as out:
             source_path = flow.path.resolve()
             mean_path = mean.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
             out.attrs["source_file"] = str(source_path)
             out.attrs["source_file_name"] = source_path.name
             out.attrs["source_file_parent"] = str(source_path.parent)
@@ -748,6 +796,9 @@ def reynolds_stresses(
             out.attrs["input_shape_time_z_y_x"] = flow.shape
 
             provenance = out.create_group("provenance")
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
             provenance.attrs["source_file"] = str(source_path)
             provenance.attrs["mean_file"] = str(mean_path)
             provenance.attrs["created_utc"] = out.attrs["created_utc"]

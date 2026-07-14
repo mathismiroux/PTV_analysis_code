@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
+
+import h5py
 
 
 def test_cli_help_runs():
@@ -26,6 +29,11 @@ def test_cli_help_runs():
     assert "--reynolds-stress" in result.stdout
     assert "--stress-components" in result.stdout
     assert "--mean-file" in result.stdout
+    assert "--case" in result.stdout
+    assert "--cases-file" in result.stdout
+    assert "--processing-id" in result.stdout
+    assert "--postprocess-basic" in result.stdout
+    assert "--cases" in result.stdout
 
 
 def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_path):
@@ -103,6 +111,253 @@ def test_cli_temporal_average_and_average_plane(tiny_flow_path, tmp_path):
         text=True,
     )
     assert figure_output.exists()
+
+
+def test_cli_case_temporal_average_uses_default_case_output(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    output = tmp_path / "outputs" / "tiny_static_x3p5d" / "mean.nc"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(repo_root / "tests" / "data" / "cases.yaml"),
+            "--temporal-average",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert output.exists()
+    with h5py.File(output, "r") as out:
+        assert out.attrs["case_id"] == "tiny_static_x3p5d"
+        assert out.attrs["processing_id"] == "tiny_static_x3p5d"
+        assert out.attrs["downstream_distance"] == "3.5D"
+        assert "wake_deficit" in out
+        assert "wake_mask_u09" in out
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(repo_root / "tests" / "data" / "cases.yaml"),
+            "--temporal-average",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    second_output = tmp_path / "outputs" / "tiny_static_x3p5d_02" / "mean.nc"
+    assert second_output.exists()
+    with h5py.File(second_output, "r") as out:
+        assert out.attrs["processing_id"] == "tiny_static_x3p5d_02"
+
+
+def test_cli_case_tke_and_reynolds_use_case_mean_file(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    cases_file = repo_root / "tests" / "data" / "cases.yaml"
+    mean_output = tmp_path / "outputs" / "tiny_static_x3p5d" / "mean.nc"
+    tke_output = tmp_path / "outputs" / "tiny_static_x3p5d" / "tke.nc"
+    stress_output = (
+        tmp_path / "outputs" / "tiny_static_x3p5d" / "reynolds_stresses.nc"
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(cases_file),
+            "--temporal-average",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert mean_output.exists()
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(cases_file),
+            "--tke",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert tke_output.exists()
+    with h5py.File(tke_output, "r") as out:
+        assert out.attrs["case_id"] == "tiny_static_x3p5d"
+        assert out.attrs["processing_id"] == "tiny_static_x3p5d"
+        assert "tke" in out
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(cases_file),
+            "--reynolds-stress",
+            "--stress-components",
+            "uv",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert stress_output.exists()
+    with h5py.File(stress_output, "r") as out:
+        assert out.attrs["case_id"] == "tiny_static_x3p5d"
+        assert out.attrs["processing_id"] == "tiny_static_x3p5d"
+        assert "uv_reynolds_stress" in out
+
+
+def test_cli_case_tke_requires_processing_id_for_ambiguous_mean_files(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    cases_file = repo_root / "tests" / "data" / "cases.yaml"
+    for processing_id in ("tiny_static_x3p5d", "tiny_static_x3p5d_02"):
+        mean_dir = tmp_path / "outputs" / processing_id
+        mean_dir.mkdir(parents=True)
+        (mean_dir / "mean.nc").write_bytes(b"not opened")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(cases_file),
+            "--tke",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert result.returncode != 0
+    assert "--processing-id" in (result.stdout + result.stderr)
+
+
+def test_cli_case_postprocess_basic_creates_all_basic_products(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    cases_file = repo_root / "tests" / "data" / "cases.yaml"
+    output_dir = tmp_path / "outputs" / "tiny_static_x3p5d"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(cases_file),
+            "--postprocess-basic",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert (output_dir / "mean.nc").exists()
+    assert (output_dir / "tke.nc").exists()
+    assert (output_dir / "reynolds_stresses.nc").exists()
+    with h5py.File(output_dir / "reynolds_stresses.nc", "r") as out:
+        assert out.attrs["case_id"] == "tiny_static_x3p5d"
+        assert "uv_reynolds_stress" in out
+        assert "ww_reynolds_stress" in out
+
+
+def test_cli_cases_postprocess_basic_creates_outputs_for_multiple_cases(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    velocity = repo_root / "tests" / "data" / "tiny_flow.nc"
+    registry = tmp_path / "cases.yaml"
+    registry.write_text(
+        f"""
+cases:
+  tiny_static_x0p6d:
+    label: Tiny static x/D=0.6
+    motion_type: static
+    downstream_distance: 0.6D
+    u_inf: 4.0
+    rotor_diameter: 1.2
+    rotor_frequency_hz: 8.0
+    blade_passing_frequency_hz: 24.0
+    files:
+      velocity: "{velocity.as_posix()}"
+
+  tiny_static_x3p5d:
+    label: Tiny static x/D=3.5
+    motion_type: static
+    downstream_distance: 3.5D
+    u_inf: 4.0
+    rotor_diameter: 1.2
+    rotor_frequency_hz: 8.0
+    blade_passing_frequency_hz: 24.0
+    files:
+      velocity: "{velocity.as_posix()}"
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--cases",
+            "tiny_static_x0p6d",
+            "tiny_static_x3p5d",
+            "--cases-file",
+            str(registry),
+            "--postprocess-basic",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    for case_id in ("tiny_static_x0p6d", "tiny_static_x3p5d"):
+        assert (tmp_path / "outputs" / case_id / "mean.nc").exists()
+        assert (tmp_path / "outputs" / case_id / "tke.nc").exists()
+        assert (tmp_path / "outputs" / case_id / "reynolds_stresses.nc").exists()
 
 
 def test_cli_temporal_average_refuses_existing_output(tiny_flow_path, tmp_path):

@@ -110,6 +110,47 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         )
 
 
+def test_temporal_average_writes_wake_products_and_case_metadata(
+    tiny_flow_path, tmp_path
+):
+    output = tmp_path / "mean.nc"
+    metadata = {
+        "case_id": "tiny_static_x3p5d",
+        "label": "Tiny static fixture",
+        "motion_type": "static",
+        "u_inf": 4.0,
+        "rotor_diameter": 1.2,
+        "rotor_frequency_hz": 8.0,
+        "blade_passing_frequency_hz": 24.0,
+    }
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(
+            flow,
+            output=output,
+            chunk_size=2,
+            u_inf=4.0,
+            metadata=metadata,
+        )
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["case_id"] == "tiny_static_x3p5d"
+        assert out.attrs["label"] == "Tiny static fixture"
+        assert out.attrs["motion_type"] == "static"
+        assert out.attrs["u_inf"] == 4.0
+        assert out["provenance"].attrs["case_id"] == "tiny_static_x3p5d"
+
+        expected_wake_deficit = (4.0 - out["u_mean"][:]) / 4.0
+        np.testing.assert_allclose(
+            out["wake_deficit"][:],
+            expected_wake_deficit,
+            equal_nan=True,
+        )
+        np.testing.assert_array_equal(
+            out["wake_mask_u09"][:],
+            out["u_mean"][:] / 4.0 < 0.9,
+        )
+
+
 def test_temporal_average_refuses_to_overwrite_existing_output(tiny_flow_path, tmp_path):
     output = tmp_path / "mean.nc"
     output.write_text("existing")

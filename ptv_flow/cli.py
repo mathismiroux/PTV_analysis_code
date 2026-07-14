@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ptv_flow.cases import DEFAULT_CASES_FILE, FlowCase, load_case
 from ptv_flow.inspect import inspect_flow_gui
 from ptv_flow.postprocess import (
     REYNOLDS_STRESS_COMPONENTS,
@@ -24,6 +25,90 @@ def print_stats(stats: dict[str, float]) -> None:
         print(f"{key:>12}: {value:.6g}")
 
 
+def _case_metadata(flow_case: FlowCase, processing_id: str) -> dict[str, str | float]:
+    metadata = flow_case.metadata_attributes()
+    metadata["processing_id"] = processing_id
+    return metadata
+
+
+def _case_mean_output(
+    flow_case: FlowCase,
+    overwrite: bool,
+    processing_id: str | None = None,
+) -> Path:
+    if processing_id is not None:
+        return flow_case.processing_output_dir(processing_id) / "mean.nc"
+    return flow_case.default_output_path("mean.nc", unique=not overwrite)
+
+
+def _compute_case_temporal_average(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    output: Path,
+    chunk_size: int,
+    zero_mask: str,
+    min_valid_fraction: float,
+    overwrite: bool,
+) -> Path:
+    metadata = _case_metadata(flow_case, output.parent.name)
+    return temporal_average_volume(
+        flow,
+        output=output,
+        chunk_size=chunk_size,
+        zero_mask=zero_mask,
+        min_valid_fraction=min_valid_fraction,
+        overwrite=overwrite,
+        u_inf=flow_case.u_inf,
+        metadata=metadata,
+    )
+
+
+def _compute_case_tke(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    mean_file: Path,
+    output: Path,
+    chunk_size: int,
+    zero_mask: str,
+    overwrite: bool,
+) -> Path:
+    metadata = _case_metadata(flow_case, mean_file.parent.name)
+    with TemporalAverageVolume(mean_file) as mean:
+        return turbulent_kinetic_energy(
+            flow,
+            mean,
+            output=output,
+            chunk_size=chunk_size,
+            zero_mask=zero_mask,
+            overwrite=overwrite,
+            metadata=metadata,
+        )
+
+
+def _compute_case_reynolds_stresses(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    mean_file: Path,
+    output: Path,
+    components: list[str],
+    chunk_size: int,
+    zero_mask: str,
+    overwrite: bool,
+) -> Path:
+    metadata = _case_metadata(flow_case, mean_file.parent.name)
+    with TemporalAverageVolume(mean_file) as mean:
+        return reynolds_stresses(
+            flow,
+            mean,
+            output=output,
+            components=components,
+            chunk_size=chunk_size,
+            zero_mask=zero_mask,
+            overwrite=overwrite,
+            metadata=metadata,
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Read and visualize 3D PTV velocity fields from NetCDF4 files."
@@ -33,7 +118,34 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=Path,
         default=DEFAULT_FILE,
-        help=f"path to the .nc file, default: {DEFAULT_FILE}",
+        help=f"path to the .nc file, default: {DEFAULT_FILE}; ignored with --case",
+    )
+    parser.add_argument(
+        "--case",
+        type=str,
+        default=None,
+        help="case id from --cases-file for paper postprocessing",
+    )
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        default=None,
+        help="one or more case ids from --cases-file for batch postprocessing",
+    )
+    parser.add_argument(
+        "--cases-file",
+        type=Path,
+        default=DEFAULT_CASES_FILE,
+        help=f"YAML case registry, default: {DEFAULT_CASES_FILE}",
+    )
+    parser.add_argument(
+        "--processing-id",
+        type=str,
+        default=None,
+        help=(
+            "specific processing output folder for --case workflows, for "
+            "example static_x3p5d_02"
+        ),
     )
     parser.add_argument(
         "--frame",
@@ -112,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--temporal-average",
         action="store_true",
         help="compute a temporal average volume, ignoring exact-zero values",
+    )
+    parser.add_argument(
+        "--postprocess-basic",
+        action="store_true",
+        help="for case workflows, compute mean.nc, tke.nc, and reynolds_stresses.nc",
     )
     parser.add_argument(
         "--average-plane",
@@ -207,6 +324,76 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.case is not None and args.cases is not None:
+        raise SystemExit("Use either --case or --cases, not both.")
+
+    if args.postprocess_basic:
+        case_ids = args.cases or ([args.case] if args.case is not None else None)
+        if not case_ids:
+            raise SystemExit("--postprocess-basic requires --case or --cases.")
+        if args.output is not None:
+            raise SystemExit("--postprocess-basic uses case output folders; omit --output.")
+        if args.mean_file is not None:
+            raise SystemExit("--postprocess-basic computes mean.nc; omit --mean-file.")
+        if args.processing_id is not None and len(case_ids) > 1:
+            raise SystemExit("--processing-id can only be used with one --case.")
+
+        for case_id in case_ids:
+            flow_case = load_case(case_id, args.cases_file)
+            flow_case.validate_for_temporal_average()
+            raw_path = flow_case.require_velocity()
+            with FlowDataset(raw_path) as flow:
+                mean_output = _case_mean_output(
+                    flow_case,
+                    overwrite=args.overwrite,
+                    processing_id=args.processing_id,
+                )
+                print(
+                    f"Postprocessing basic products for case {case_id!r} "
+                    f"into {mean_output.parent}",
+                    flush=True,
+                )
+                try:
+                    mean_file = _compute_case_temporal_average(
+                        flow_case=flow_case,
+                        flow=flow,
+                        output=mean_output,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        min_valid_fraction=args.min_valid_fraction,
+                        overwrite=args.overwrite,
+                    )
+                    _compute_case_tke(
+                        flow_case=flow_case,
+                        flow=flow,
+                        mean_file=mean_file,
+                        output=mean_file.parent / "tke.nc",
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                    )
+                    _compute_case_reynolds_stresses(
+                        flow_case=flow_case,
+                        flow=flow,
+                        mean_file=mean_file,
+                        output=mean_file.parent / "reynolds_stresses.nc",
+                        components=args.stress_components,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                    )
+                except FileExistsError as exc:
+                    raise SystemExit(str(exc)) from exc
+        return
+
+    flow_case = None
+    raw_path = args.path
+    if args.case is not None:
+        flow_case = load_case(args.case, args.cases_file)
+        if args.temporal_average:
+            flow_case.validate_for_temporal_average()
+        raw_path = flow_case.require_velocity()
+
     if args.apply_valid_fraction is not None:
         if args.output is None:
             raise SystemExit("--apply-valid-fraction requires --output.")
@@ -237,57 +424,115 @@ def main() -> None:
             )
         return
 
-    with FlowDataset(args.path) as flow:
+    with FlowDataset(raw_path) as flow:
         if args.reynolds_stress:
-            if args.mean_file is None:
+            if args.mean_file is None and flow_case is None:
                 raise SystemExit("--reynolds-stress requires --mean-file.")
+            mean_file = args.mean_file
+            if mean_file is None and flow_case is not None:
+                mean_file = flow_case.resolve_existing_product(
+                    "mean.nc",
+                    processing_id=args.processing_id,
+                )
             output = args.output
             if output is None:
-                output = Path("outputs") / f"{args.path.stem}_reynolds_stresses.nc"
+                if flow_case is not None:
+                    output = mean_file.parent / "reynolds_stresses.nc"
+                else:
+                    output = Path("outputs") / f"{raw_path.stem}_reynolds_stresses.nc"
             try:
-                with TemporalAverageVolume(args.mean_file) as mean:
-                    reynolds_stresses(
+                if flow_case is not None:
+                    _compute_case_reynolds_stresses(
+                        flow_case,
                         flow,
-                        mean,
+                        mean_file,
                         output=output,
                         components=args.stress_components,
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
                     )
+                else:
+                    with TemporalAverageVolume(mean_file) as mean:
+                        reynolds_stresses(
+                            flow,
+                            mean,
+                            output=output,
+                            components=args.stress_components,
+                            chunk_size=args.chunk_size,
+                            zero_mask=args.zero_mask,
+                            overwrite=args.overwrite,
+                        )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
         elif args.tke:
-            if args.mean_file is None:
+            if args.mean_file is None and flow_case is None:
                 raise SystemExit("--tke requires --mean-file.")
+            mean_file = args.mean_file
+            if mean_file is None and flow_case is not None:
+                mean_file = flow_case.resolve_existing_product(
+                    "mean.nc",
+                    processing_id=args.processing_id,
+                )
             output = args.output
             if output is None:
-                output = Path("outputs") / f"{args.path.stem}_tke.nc"
+                if flow_case is not None:
+                    output = mean_file.parent / "tke.nc"
+                else:
+                    output = Path("outputs") / f"{raw_path.stem}_tke.nc"
             try:
-                with TemporalAverageVolume(args.mean_file) as mean:
-                    turbulent_kinetic_energy(
+                if flow_case is not None:
+                    _compute_case_tke(
+                        flow_case,
                         flow,
-                        mean,
+                        mean_file,
                         output=output,
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
                     )
+                else:
+                    with TemporalAverageVolume(mean_file) as mean:
+                        turbulent_kinetic_energy(
+                            flow,
+                            mean,
+                            output=output,
+                            chunk_size=args.chunk_size,
+                            zero_mask=args.zero_mask,
+                            overwrite=args.overwrite,
+                        )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
         elif args.temporal_average:
             output = args.output
             if output is None:
-                output = Path("outputs") / f"{args.path.stem}_temporal_mean.nc"
+                if flow_case is not None:
+                    output = flow_case.default_output_path(
+                        "mean.nc",
+                        unique=not args.overwrite,
+                    )
+                else:
+                    output = Path("outputs") / f"{raw_path.stem}_temporal_mean.nc"
             try:
-                temporal_average_volume(
-                    flow,
-                    output=output,
-                    chunk_size=args.chunk_size,
-                    zero_mask=args.zero_mask,
-                    min_valid_fraction=args.min_valid_fraction,
-                    overwrite=args.overwrite,
-                )
+                if flow_case is not None:
+                    _compute_case_temporal_average(
+                        flow_case=flow_case,
+                        flow=flow,
+                        output=output,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        min_valid_fraction=args.min_valid_fraction,
+                        overwrite=args.overwrite,
+                    )
+                else:
+                    temporal_average_volume(
+                        flow,
+                        output=output,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        min_valid_fraction=args.min_valid_fraction,
+                        overwrite=args.overwrite,
+                    )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
         elif args.animate:

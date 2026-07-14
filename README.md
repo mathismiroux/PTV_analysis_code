@@ -79,6 +79,152 @@ python main.py "path\to\file.nc" [options]
 If no path is provided, the code uses `Static_3.5D__b128f.nc` in the repository
 root.
 
+### Case Registry Workflow
+
+For paper postprocessing, use `cases.yaml` as the source of truth for case
+metadata and file paths:
+
+```powershell
+python main.py --case static_x3p5d --cases-file cases.yaml --temporal-average
+```
+
+This reads the velocity file from the selected case and writes the default
+case output:
+
+```text
+outputs\static_x3p5d\mean.nc
+```
+
+The YAML key, for example `static_x3p5d`, is the unique case selected at the
+CLI and the default output folder name. Include `downstream_distance` in that
+key when needed to distinguish repeated static, surge, or pitch exports. If
+that output product already exists, the next default run writes to
+`static_x3p5d_02`, `static_x3p5d_03`, and so on, unless `--overwrite` is
+passed.
+
+Case paths in `cases.yaml` are resolved relative to the registry file. Cases
+whose data paths are not available yet can remain in the registry with `null`
+file entries; they only fail when you try to process that specific case.
+
+To compute the first complete statistical product set for one case:
+
+```powershell
+python main.py --case static_x3p5d --postprocess-basic
+```
+
+This writes:
+
+```text
+outputs\static_x3p5d\mean.nc
+outputs\static_x3p5d\tke.nc
+outputs\static_x3p5d\reynolds_stresses.nc
+```
+
+For several cases:
+
+```powershell
+python main.py --cases static_x0p6d static_x3p5d --postprocess-basic
+```
+
+`--postprocess-basic` computes the temporal mean first, then uses that exact
+`mean.nc` to compute TKE and Reynolds stresses in the same output folder.
+
+### Adding A New Case Safely
+
+When you copy a new DaVis/exported `.nc` file into the project, do this before
+running postprocessing:
+
+1. Put the raw file somewhere stable.
+
+   Good options are the repository root for quick local work, or a data folder
+   outside Git. Large `.nc` files should not be committed.
+
+2. Choose a unique `case_id`.
+
+   The `case_id` is the YAML key in `cases.yaml`, the CLI name, and the default
+   output folder. Include the downstream distance and any export/binned-data
+   distinction needed to avoid ambiguity, for example:
+
+   ```text
+   static_x0p6d
+   static_x3p5d_b96
+   surge_st06_x1p5d_b128
+   pitch_st15_x3p5d_davis_v2
+   ```
+
+3. Add or update the entry in `cases.yaml`.
+
+   Minimal example:
+
+   ```yaml
+   cases:
+     static_x3p5d_b96:
+       label: "Static baseline, x/D=3.5, b96"
+       motion_type: static
+       downstream_distance: 3.5D
+       frequency_hz: null
+       reduced_frequency: null
+       amplitude: null
+       u_inf: 4.0
+       rotor_diameter: 1.2
+       rotor_frequency_hz: 8.0
+       blade_passing_frequency_hz: 24.0
+       files:
+         velocity: "path/to/Static_3.5D__b96.nc"
+         vorticity: null
+         q_criterion: null
+         phase_signal: null
+   ```
+
+   Relative paths are resolved relative to `cases.yaml`. Absolute paths are also
+   allowed.
+
+4. Check that the raw file can be read.
+
+   ```powershell
+   python main.py --case static_x3p5d_b96
+   ```
+
+   This prints the file shape, coordinate ranges, voxel size, and one frame
+   summary. If the path or variables are wrong, fix this before postprocessing.
+
+5. Run the basic postprocessing.
+
+   ```powershell
+   python main.py --case static_x3p5d_b96 --postprocess-basic
+   ```
+
+   This creates:
+
+   ```text
+   outputs\static_x3p5d_b96\mean.nc
+   outputs\static_x3p5d_b96\tke.nc
+   outputs\static_x3p5d_b96\reynolds_stresses.nc
+   ```
+
+6. If you rerun intentionally, decide whether you want a new folder or an
+   overwrite.
+
+   By default, existing products are not overwritten. A second run creates:
+
+   ```text
+   outputs\static_x3p5d_b96_02\mean.nc
+   ```
+
+   To replace the existing product instead:
+
+   ```powershell
+   python main.py --case static_x3p5d_b96 --postprocess-basic --overwrite
+   ```
+
+7. Use `--processing-id` when several processed versions exist.
+
+   ```powershell
+   python main.py --case static_x3p5d_b96 --processing-id static_x3p5d_b96_02 --tke
+   ```
+
+   This prevents accidentally using the wrong `mean.nc`.
+
 ### Inspect A Raw Time-Series File
 
 Print file metadata, grid dimensions, coordinate ranges, voxel size, and one
@@ -184,6 +330,12 @@ Options:
 The output file contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
 `u_count`, `v_count`, `w_count`, and `speed_from_mean`.
 
+When run with `--case`, the output also contains plot-ready wake products:
+`wake_deficit = (U_inf - u_mean) / U_inf` and
+`wake_mask_u09 = u_mean / U_inf < 0.9`. The file attributes include case
+metadata such as `case_id`, `motion_type`, `u_inf`, `rotor_diameter`,
+`frequency_hz`, and rotor/blade-passing frequencies.
+
 Processed files store provenance metadata in the file attributes and in a
 `provenance` group, including the source file path, source file name, source
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
@@ -196,6 +348,8 @@ computed mean velocity file:
 
 ```powershell
 python main.py "path\to\raw_file.nc" --tke --mean-file outputs\temporal_mean.nc --output outputs\tke.nc
+python main.py --case static_x3p5d --tke
+python main.py --case static_x3p5d --processing-id static_x3p5d_02 --tke
 ```
 
 The command computes:
@@ -213,6 +367,9 @@ Options:
 
 - `--mean-file path.nc`: temporal-average file containing `u_mean`, `v_mean`,
   and `w_mean`. It must have the same `x`, `y`, `z` grid as the raw file.
+- `--processing-id ID`: with `--case`, choose which case output folder supplies
+  `mean.nc`, for example `static_x3p5d_02`. If omitted, exactly one matching
+  `outputs/{case_id}*/mean.nc` file must exist.
 - `--output path.nc`: output file for the TKE volume.
 - `--overwrite`: allow replacing an existing output file.
 - `--chunk-size N`: number of time steps read at once.
@@ -224,6 +381,8 @@ Options:
 The output file contains `x`, `y`, `z`, `u_prime2_mean`, `v_prime2_mean`,
 `w_prime2_mean`, component counts, and `tke`. Provenance metadata records both
 the raw source file and the mean velocity file used to create the result.
+With `--case`, the default output is written beside the mean file, for example
+`outputs\static_x3p5d\tke.nc`.
 
 ### Compute Reynolds Stresses
 
@@ -234,6 +393,8 @@ already computed mean velocity file:
 python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components uv --output outputs\reynolds_uv.nc
 python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components uu vv ww --output outputs\reynolds_diagonal.nc
 python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components all --output outputs\reynolds_all.nc
+python main.py --case static_x3p5d --reynolds-stress --stress-components all
+python main.py --case static_x3p5d --processing-id static_x3p5d_02 --reynolds-stress --stress-components uv
 ```
 
 The available components are `uu`, `uv`, `uw`, `vv`, `vw`, and `ww`, where:
@@ -251,6 +412,9 @@ Options:
 - `--mean-file path.nc`: temporal-average file containing `u_mean`, `v_mean`,
   and `w_mean`. It must have the same source file provenance and `x`, `y`, `z`
   grid as the raw file.
+- `--processing-id ID`: with `--case`, choose which case output folder supplies
+  `mean.nc`, for example `static_x3p5d_02`. If omitted, exactly one matching
+  `outputs/{case_id}*/mean.nc` file must exist.
 - `--stress-components uu uv ...`: one or more components to compute. Use
   `all` to compute all six independent components.
 - `--output path.nc`: output file for the Reynolds stress volume.
@@ -265,6 +429,8 @@ The output file contains `x`, `y`, `z`, one `{component}_reynolds_stress`
 dataset for each requested component, and matching `{component}_count`
 datasets. Provenance metadata records both the raw source file and the mean
 velocity file used to create the result.
+With `--case`, the default output is written beside the mean file, for example
+`outputs\static_x3p5d\reynolds_stresses.nc`.
 
 ### Apply A Valid-Fraction Cutoff To An Existing Average
 

@@ -225,6 +225,47 @@ The output file contains `x`, `y`, `z`, `u_prime2_mean`, `v_prime2_mean`,
 `w_prime2_mean`, component counts, and `tke`. Provenance metadata records both
 the raw source file and the mean velocity file used to create the result.
 
+### Compute Reynolds Stresses
+
+Compute selected Reynolds stress components from a raw 4D time series and an
+already computed mean velocity file:
+
+```powershell
+python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components uv --output outputs\reynolds_uv.nc
+python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components uu vv ww --output outputs\reynolds_diagonal.nc
+python main.py "path\to\raw_file.nc" --reynolds-stress --mean-file outputs\temporal_mean.nc --stress-components all --output outputs\reynolds_all.nc
+```
+
+The available components are `uu`, `uv`, `uw`, `vv`, `vw`, and `ww`, where:
+
+```text
+uv = mean(u_prime * v_prime)
+```
+
+and similarly for the other components. Exact-zero raw samples are ignored
+using the same `--zero-mask component` or `--zero-mask vector` modes as
+temporal averaging.
+
+Options:
+
+- `--mean-file path.nc`: temporal-average file containing `u_mean`, `v_mean`,
+  and `w_mean`. It must have the same source file provenance and `x`, `y`, `z`
+  grid as the raw file.
+- `--stress-components uu uv ...`: one or more components to compute. Use
+  `all` to compute all six independent components.
+- `--output path.nc`: output file for the Reynolds stress volume.
+- `--overwrite`: allow replacing an existing output file.
+- `--chunk-size N`: number of time steps read at once.
+- `--zero-mask component`: default. Ignore exact zeros independently for each
+  component used in a stress product.
+- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
+  exactly zero.
+
+The output file contains `x`, `y`, `z`, one `{component}_reynolds_stress`
+dataset for each requested component, and matching `{component}_count`
+datasets. Provenance metadata records both the raw source file and the mean
+velocity file used to create the result.
+
 ### Apply A Valid-Fraction Cutoff To An Existing Average
 
 If you already have a temporal-average file, apply a valid-count cutoff without

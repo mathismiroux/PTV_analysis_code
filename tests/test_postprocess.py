@@ -6,6 +6,7 @@ import numpy as np
 from ptv_flow.postprocess import (
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
+    reynolds_stresses,
     temporal_average_volume,
     turbulent_kinetic_energy,
 )
@@ -41,6 +42,32 @@ def _expected_component_prime2(
         where=counts > 0,
     )
     return variances, counts
+
+
+def _expected_reynolds_stress(
+    data_a: np.ndarray,
+    mean_a: np.ndarray,
+    data_b: np.ndarray,
+    mean_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    valid = (
+        (data_a != 0.0)
+        & (data_b != 0.0)
+        & np.isfinite(mean_a)[None, :, :, :]
+        & np.isfinite(mean_b)[None, :, :, :]
+    )
+    counts = valid.sum(axis=0, dtype=np.uint32)
+    stress = np.full(data_a.shape[1:], np.nan, dtype=np.float64)
+    product = (data_a - mean_a[None, :, :, :]) * (
+        data_b - mean_b[None, :, :, :]
+    )
+    np.divide(
+        np.where(valid, product, 0.0).sum(axis=0, dtype=np.float64),
+        counts,
+        out=stress,
+        where=counts > 0,
+    )
+    return stress, counts
 
 
 def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_path):
@@ -312,6 +339,73 @@ def test_turbulent_kinetic_energy_refuses_different_mean_source(
             assert "provenance does not match raw file" in str(exc)
         else:
             raise AssertionError("Expected ValueError")
+
+
+def test_reynolds_stresses_selected_components_match_fixture(
+    tiny_flow_path, tmp_path
+):
+    average_output = tmp_path / "mean.nc"
+    stress_output = tmp_path / "reynolds.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(flow, average_output, chunk_size=2)
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(average_output) as mean:
+        reynolds_stresses(
+            flow,
+            mean,
+            output=stress_output,
+            components=("uv", "ww"),
+            chunk_size=2,
+        )
+
+    with (
+        h5py.File(tiny_flow_path, "r") as src,
+        h5py.File(average_output, "r") as mean,
+        h5py.File(stress_output, "r") as out,
+    ):
+        assert out.attrs["operation"] == "reynolds_stresses"
+        assert out.attrs["source_file_name"] == "tiny_flow.nc"
+        assert out.attrs["mean_file_name"] == "mean.nc"
+        assert set(out.keys()) == {
+            "provenance",
+            "uv_count",
+            "uv_reynolds_stress",
+            "ww_count",
+            "ww_reynolds_stress",
+            "x",
+            "y",
+            "z",
+        }
+
+        for component in ("uv", "ww"):
+            first, second = component
+            expected, count = _expected_reynolds_stress(
+                src[first][:],
+                mean[f"{first}_mean"][:],
+                src[second][:],
+                mean[f"{second}_mean"][:],
+            )
+            np.testing.assert_allclose(
+                out[f"{component}_reynolds_stress"][:],
+                expected,
+                equal_nan=True,
+            )
+            np.testing.assert_array_equal(out[f"{component}_count"][:], count)
+
+
+def test_reynolds_stresses_all_components(tiny_flow_path, tmp_path):
+    average_output = tmp_path / "mean.nc"
+    stress_output = tmp_path / "reynolds_all.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(flow, average_output, chunk_size=2)
+
+    with FlowDataset(tiny_flow_path) as flow, TemporalAverageVolume(average_output) as mean:
+        reynolds_stresses(flow, mean, output=stress_output, chunk_size=2)
+
+    with h5py.File(stress_output, "r") as out:
+        for component in ("uu", "uv", "uw", "vv", "vw", "ww"):
+            assert f"{component}_reynolds_stress" in out
+            assert f"{component}_count" in out
 
 
 def test_temporal_average_volume_reader(tiny_flow_path, tmp_path):

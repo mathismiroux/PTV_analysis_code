@@ -5,8 +5,10 @@ from pathlib import Path
 
 from ptv_flow.inspect import inspect_flow_gui
 from ptv_flow.postprocess import (
+    REYNOLDS_STRESS_COMPONENTS,
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
+    reynolds_stresses,
     temporal_average_volume,
     turbulent_kinetic_energy,
 )
@@ -128,6 +130,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="compute turbulent kinetic energy from a raw file and a mean file",
     )
     parser.add_argument(
+        "--reynolds-stress",
+        action="store_true",
+        help="compute Reynolds stress components from a raw file and a mean file",
+    )
+    parser.add_argument(
+        "--stress-components",
+        nargs="+",
+        choices=(*REYNOLDS_STRESS_COMPONENTS, "all"),
+        default=["all"],
+        help=(
+            "Reynolds stress components for --reynolds-stress: uu uv uw "
+            "vv vw ww or all"
+        ),
+    )
+    parser.add_argument(
         "--quantity",
         choices=("speed", "u", "v", "w"),
         default="speed",
@@ -154,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mean-file",
         type=Path,
         default=None,
-        help="temporal-average velocity file used by --tke",
+        help="temporal-average velocity file used by --tke or --reynolds-stress",
     )
     parser.add_argument(
         "--compare-average",
@@ -221,7 +238,26 @@ def main() -> None:
         return
 
     with FlowDataset(args.path) as flow:
-        if args.tke:
+        if args.reynolds_stress:
+            if args.mean_file is None:
+                raise SystemExit("--reynolds-stress requires --mean-file.")
+            output = args.output
+            if output is None:
+                output = Path("outputs") / f"{args.path.stem}_reynolds_stresses.nc"
+            try:
+                with TemporalAverageVolume(args.mean_file) as mean:
+                    reynolds_stresses(
+                        flow,
+                        mean,
+                        output=output,
+                        components=args.stress_components,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                    )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
+        elif args.tke:
             if args.mean_file is None:
                 raise SystemExit("--tke requires --mean-file.")
             output = args.output

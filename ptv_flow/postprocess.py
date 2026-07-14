@@ -10,6 +10,8 @@ import numpy as np
 
 from ptv_flow.reader import COORDINATES, VELOCITY_COMPONENTS, FlowDataset
 
+REYNOLDS_STRESS_COMPONENTS = ("uu", "uv", "uw", "vv", "vw", "ww")
+
 
 def _prepare_output_path(output: Path, overwrite: bool) -> tuple[Path, Path]:
     output = Path(output)
@@ -436,7 +438,7 @@ def _validate_mean_compatible(flow: FlowDataset, mean: TemporalAverageVolume) ->
     mean_source = mean._file.attrs.get("source_file")
     if mean_source is None:
         raise ValueError(
-            "Mean file is missing 'source_file' provenance, so TKE cannot "
+            "Mean file is missing 'source_file' provenance, so postprocessing cannot "
             f"verify that it was created from the raw file: {flow.path}"
         )
     if isinstance(mean_source, bytes):
@@ -596,4 +598,189 @@ def turbulent_kinetic_energy(
         raise
 
     print(f"Saved turbulent kinetic energy to: {output.resolve()}", flush=True)
+    return output
+
+
+def _normalize_reynolds_stress_components(
+    components: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    normalized = tuple(component.lower() for component in components)
+    if "all" in normalized:
+        if len(normalized) > 1:
+            raise ValueError("Use either 'all' or explicit Reynolds stress components")
+        return REYNOLDS_STRESS_COMPONENTS
+
+    invalid = [
+        component
+        for component in normalized
+        if component not in REYNOLDS_STRESS_COMPONENTS
+    ]
+    if invalid:
+        raise ValueError(
+            "Unknown Reynolds stress component(s): "
+            f"{', '.join(invalid)}. Choose from "
+            f"{', '.join(REYNOLDS_STRESS_COMPONENTS)} or all."
+        )
+    return tuple(dict.fromkeys(normalized))
+
+
+def reynolds_stresses(
+    flow: FlowDataset,
+    mean: TemporalAverageVolume,
+    output: Path,
+    components: tuple[str, ...] | list[str] = ("all",),
+    chunk_size: int = 50,
+    zero_mask: str = "component",
+    overwrite: bool = False,
+) -> Path:
+    """Compute selected Reynolds stress components from raw and mean velocities.
+
+    The stored fields are temporal means of fluctuation products, for example
+    ``uv_reynolds_stress = mean(u_prime * v_prime)``.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if zero_mask not in {"component", "vector"}:
+        raise ValueError("zero_mask must be 'component' or 'vector'")
+
+    selected_components = _normalize_reynolds_stress_components(components)
+    _validate_mean_compatible(flow, mean)
+    output, temporary_output = _prepare_output_path(output, overwrite)
+
+    mean_fields = {
+        name: mean._file[f"{name}_mean"][:].astype(np.float64)
+        for name in VELOCITY_COMPONENTS
+    }
+    sums = {
+        component: np.zeros(flow.grid_shape, dtype=np.float64)
+        for component in selected_components
+    }
+    counts = {
+        component: np.zeros(flow.grid_shape, dtype=np.uint32)
+        for component in selected_components
+    }
+
+    print(f"Reading NetCDF file: {flow.path.resolve()}", flush=True)
+    print(f"Reading mean velocity file: {mean.path.resolve()}", flush=True)
+    print(
+        f"Computing Reynolds stresses {', '.join(selected_components)} over "
+        f"{flow.n_times} time steps, grid={flow.grid_shape}, "
+        f"zero_mask={zero_mask}, chunk_size={chunk_size}",
+        flush=True,
+    )
+
+    start_time = perf_counter()
+    for start in range(0, flow.n_times, chunk_size):
+        stop = min(start + chunk_size, flow.n_times)
+        chunks = {
+            name: flow._file[name][start:stop, :, :, :]
+            for name in VELOCITY_COMPONENTS
+        }
+        fluctuations = {
+            name: chunks[name] - mean_fields[name][None, :, :, :]
+            for name in VELOCITY_COMPONENTS
+        }
+        finite_mean = {
+            name: np.isfinite(mean_fields[name])[None, :, :, :]
+            for name in VELOCITY_COMPONENTS
+        }
+        if zero_mask == "vector":
+            vector_valid = np.logical_not(
+                (chunks["u"] == 0.0) & (chunks["v"] == 0.0) & (chunks["w"] == 0.0)
+            )
+            valid_by_component = {
+                name: vector_valid & finite_mean[name] for name in VELOCITY_COMPONENTS
+            }
+        else:
+            valid_by_component = {
+                name: (chunks[name] != 0.0) & finite_mean[name]
+                for name in VELOCITY_COMPONENTS
+            }
+
+        for component in selected_components:
+            first, second = component
+            valid = valid_by_component[first] & valid_by_component[second]
+            product = fluctuations[first] * fluctuations[second]
+            sums[component] += np.where(valid, product, 0.0).sum(
+                axis=0, dtype=np.float64
+            )
+            counts[component] += valid.sum(axis=0, dtype=np.uint32)
+
+        elapsed = perf_counter() - start_time
+        print(
+            f"Processed time steps {start:4d}-{stop - 1:4d} / "
+            f"{flow.n_times - 1} ({elapsed:.1f} s)",
+            flush=True,
+        )
+
+    stresses = {}
+    for component in selected_components:
+        stresses[component] = np.full(flow.grid_shape, np.nan, dtype=np.float64)
+        np.divide(
+            sums[component],
+            counts[component],
+            out=stresses[component],
+            where=counts[component] > 0,
+        )
+
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            mean_path = mean.path.resolve()
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["mean_file"] = str(mean_path)
+            out.attrs["mean_file_name"] = mean_path.name
+            out.attrs["mean_file_parent"] = str(mean_path.parent)
+            out.attrs["mean_file_size_bytes"] = mean_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "reynolds_stresses"
+            out.attrs["formula"] = "mean(component_a_prime * component_b_prime)"
+            out.attrs["reynolds_stress_components"] = np.array(
+                selected_components, dtype=h5py.string_dtype()
+            )
+            out.attrs["zero_mask"] = zero_mask
+            out.attrs["chunk_size"] = chunk_size
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
+
+            provenance = out.create_group("provenance")
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["mean_file"] = str(mean_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["components"] = np.array(
+                selected_components, dtype=h5py.string_dtype()
+            )
+            provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["chunk_size"] = chunk_size
+
+            for name in COORDINATES:
+                if name == "t":
+                    continue
+                out.create_dataset(name, data=flow.coordinate(name))
+
+            for component in selected_components:
+                out.create_dataset(
+                    f"{component}_reynolds_stress",
+                    data=stresses[component],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{component}_count",
+                    data=counts[component],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(f"Saved Reynolds stresses to: {output.resolve()}", flush=True)
     return output

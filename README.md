@@ -542,6 +542,88 @@ and `z = 0 mm`, with a half-width of `90 mm` in every direction. This gives a
 original 60 mm cube. Use `--invalid-samples {zero,nan,zero-or-nan,none}` to
 choose which raw samples are excluded from the fluctuation statistics.
 
+### Compare Squared Swirling-Strength Exports
+
+Compare two table-like 3D exports that already contain squared swirling
+strength, without recomputing velocity gradients:
+
+```powershell
+python scripts\compare_squared_swirling_strength_exports.py fine_export.csv coarse_export.csv --label-a fine --label-b coarse --coordinate-unit mm --output-folder outputs\swirl_compare
+```
+
+The script looks for `x`, `y`, `z`, and a squared swirling-strength column with
+names such as `lambda_ci_squared`, `lambda_ci^2`, `LambdaCi2`,
+`swirling_strength_squared`, `swirl2`, or `lambda2`. If `u` is present it also
+plots the centre-plane `u/U_inf`.
+
+Useful options:
+
+- `--rotor-diameter 1.2`: rotor diameter `D` in metres.
+- `--u-inf 4.0`: inflow velocity in m/s.
+- `--coordinate-unit {m,mm}`: convert coordinates to metres before analysis.
+- `--min-component-size N`: remove detected vortex regions with fewer than
+  `N` grid cells.
+- `--remove-boundary-components`: ignore components touching the domain
+  boundary.
+
+Outputs include grid-quality diagnostics, field-comparison metrics, detected
+component properties, component matches, plots, and a recommendation report.
+
+### Detect Vortex Cores From Exported Swirling Strength
+
+For vortex-core detection, the code follows the swirling-strength criterion
+described in the VortexFitting methodology:
+<https://guilindner.github.io/VortexFitting/methodology.html#swirling-strength-criterion>.
+In this repository we use the already exported squared swirling-strength field
+directly; we do not recompute `lambda_ci` from velocity gradients.
+
+For the DaVis NetCDF exports where `swir` appears to store `-lambda_ci^2`, use
+`--use-davis-values` when you want to avoid any zero or velocity-hole masking
+and inspect exactly what DaVis exported:
+
+```powershell
+python scripts\compare_squared_swirling_strength_exports.py "D:\Static_3.5D__b64v50oallvar_f.nc" --detect-only --label-a b64 --frame 0 --swirl-variable swir --swirl-sign negative --use-davis-values --coordinate-unit mm --core-threshold p99 --min-component-size 3 --output-folder outputs\vortex_cores_b64_frame0
+```
+
+This saves `vortex_core_overview.png`, `detected_components.csv`,
+`grid_quality.csv`, and `vortex_core_report.json`.
+
+To inspect how vortex-core candidates evolve over time in a `z` plane, open the
+interactive viewer:
+
+```powershell
+python scripts\compare_squared_swirling_strength_exports.py "D:\Static_3.5D__b64v50oallvar_f.nc" --inspect-z --label-a b64 --frame 0 --z-value 0 --swirl-variable swir --swirl-sign negative --use-davis-values --coordinate-unit mm --inspect-percentile 99 --min-component-size 3
+```
+
+The viewer has sliders for frame, `z` index, and percentile threshold. It
+displays the non-dimensionalized exported `lambda_ci^2` field, contours the
+active threshold, and marks detected component weighted centroids and peaks.
+If you instead want to hide missing velocity regions, replace
+`--use-davis-values` with `--hole-mask velocity-zero`.
+
+To compare two exports side by side in one interactive window, pass both files
+and use `--inspect-z-compare`:
+
+```powershell
+python scripts\compare_squared_swirling_strength_exports.py "D:\Static_3.5D__b64v50oallvar_f.nc" "D:\Static_3.5D__b64v75oallvar_f.nc" --inspect-z-compare --label-a b64v50 --label-b b64v75 --frame 0 --z-value 0 --swirl-variable swir --swirl-sign negative --use-davis-values --coordinate-unit mm --inspect-percentile 99 --min-component-size 3
+```
+
+The comparison viewer uses one frame slider, one physical `z` slider, and one
+threshold-percentile slider. Each file uses its nearest available `z` plane to
+the requested physical value, and the two panels share the same color scale at
+each slider position.
+
+To save a GIF of the same z-plane detector through time:
+
+```powershell
+python scripts\compare_squared_swirling_strength_exports.py "D:\Static_3.5D__b64v50oallvar_f.nc" --animate-z --label-a b64 --z-value 0 --swirl-variable swir --swirl-sign negative --use-davis-values --coordinate-unit mm --inspect-percentile 99 --min-component-size 3 --fps 10 --start 0 --stop 4000 --step 1 --save outputs\vortex_cores_b64_z0.gif
+```
+
+The GIF uses one fixed color scale for the whole selected time range. By
+default, the color maximum is the largest frame-wise 99.5th percentile among
+the selected frames. Use `--color-vmax VALUE` to set it manually. Use a larger
+`--step` for a lighter preview GIF, for example `--step 10`.
+
 ## Optional Editable Install
 
 For repeated use, install the repository as a local Python package:

@@ -20,6 +20,7 @@ def test_cli_help_runs():
     assert "--average-file" in result.stdout
     assert "--compare-average" in result.stdout
     assert "--min-valid-fraction" in result.stdout
+    assert "--invalid-samples" in result.stdout
     assert "--quantity" in result.stdout
     assert "--plane" in result.stdout
     assert "--plane-value" in result.stdout

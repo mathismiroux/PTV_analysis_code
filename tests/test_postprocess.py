@@ -77,6 +77,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
 
     with h5py.File(tiny_flow_path, "r") as src, h5py.File(output, "r") as out:
         assert out.attrs["zero_mask"] == "component"
+        assert out.attrs["invalid_samples"] == "zero"
         assert set(out.keys()) == {
             "provenance",
             "speed_from_mean",
@@ -94,6 +95,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         assert out.attrs["source_file_name"] == "tiny_flow.nc"
         assert "created_utc" in out.attrs
         assert out["provenance"].attrs["source_file"].endswith("tiny_flow.nc")
+        assert out["provenance"].attrs["invalid_samples"] == "zero"
 
         for name in ("u", "v", "w"):
             expected_mean, expected_count = _expected_component_mean(src[name][:])
@@ -252,6 +254,45 @@ def test_temporal_average_min_valid_fraction_discards_sparse_values(tmp_path):
         np.testing.assert_array_equal(out["v_count"][:], [[[4]]])
         np.testing.assert_array_equal(out["w_count"][:], [[[5]]])
         assert np.isnan(out["speed_from_mean"][0, 0, 0])
+
+
+def test_temporal_average_invalid_samples_zero_or_nan(tmp_path):
+    raw = tmp_path / "zero_and_nan.nc"
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(4, dtype=np.float32))
+        h5.create_dataset("z", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("y", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("x", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset(
+            "u",
+            data=np.array([[[[0.0]]], [[[2.0]]], [[[np.nan]]], [[[4.0]]]]),
+        )
+        h5.create_dataset(
+            "v",
+            data=np.array([[[[1.0]]], [[[0.0]]], [[[np.nan]]], [[[5.0]]]]),
+        )
+        h5.create_dataset(
+            "w",
+            data=np.array([[[[1.0]]], [[[3.0]]], [[[0.0]]], [[[np.nan]]]]),
+        )
+
+    output = tmp_path / "mean.nc"
+    with FlowDataset(raw) as flow:
+        temporal_average_volume(
+            flow,
+            output,
+            chunk_size=2,
+            invalid_samples="zero-or-nan",
+        )
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["invalid_samples"] == "zero-or-nan"
+        assert out["u_mean"][0, 0, 0] == 3.0
+        assert out["v_mean"][0, 0, 0] == 3.0
+        assert out["w_mean"][0, 0, 0] == 2.0
+        np.testing.assert_array_equal(out["u_count"][:], [[[2]]])
+        np.testing.assert_array_equal(out["v_count"][:], [[[2]]])
+        np.testing.assert_array_equal(out["w_count"][:], [[[2]]])
 
 
 def test_apply_valid_fraction_to_existing_average(tmp_path):

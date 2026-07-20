@@ -37,6 +37,17 @@ def test_component_mean_ignores_exact_zeros():
     assert not rejected.accepted
 
 
+def test_component_mean_can_ignore_zero_and_nan():
+    mean = component_mean_ignoring_zero(
+        np.array([0.0, 2.0, np.nan, 4.0]),
+        invalid_samples="zero-or-nan",
+    )
+
+    assert mean.mean == 3.0
+    assert mean.count == 2
+    assert mean.accepted
+
+
 def test_nearest_index():
     assert nearest_index(np.array([10.0, 20.0, 30.0]), 26.0) == 2
     assert nearest_index(np.array([10.0, 20.0, 30.0]), 14.0) == 0

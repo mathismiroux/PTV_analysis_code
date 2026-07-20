@@ -10,6 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ptv_flow.reader import FlowDataset, VELOCITY_COMPONENTS
+from ptv_flow.validity import INVALID_SAMPLE_MODES, valid_component_samples
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,8 @@ def _read_component_cube(
     return np.asarray(data[:, :, :, :], dtype=np.float64)
 
 
-def _component_stats(data: np.ndarray) -> ComponentStats:
-    valid = data != 0.0
+def _component_stats(data: np.ndarray, invalid_samples: str = "zero") -> ComponentStats:
+    valid = valid_component_samples(data, invalid_samples)
     count = valid.sum(axis=0, dtype=np.uint32)
     mean = np.full(data.shape[1:], np.nan, dtype=np.float64)
     np.divide(
@@ -123,6 +124,7 @@ def compare_precision(
     z_center: float,
     half_width: float,
     x_center: float | None,
+    invalid_samples: str = "zero",
 ) -> str:
     lines: list[str] = []
     with FlowDataset(double_path) as double, FlowDataset(single_path) as single:
@@ -147,6 +149,7 @@ def compare_precision(
                 f"single file: {single.path.resolve()}",
                 f"double dtype: {double.dtype}, single dtype: {single.dtype}",
                 f"time steps: {double.n_times}",
+                f"invalid samples: {invalid_samples}",
                 "",
                 "Selected cube:",
                 (
@@ -185,14 +188,16 @@ def compare_precision(
             single_data = _read_component_cube(
                 single, component, z_sel.indices, y_sel.indices, x_sel.indices
             )
-            d_stats = _component_stats(double_data)
-            s_stats = _component_stats(single_data)
+            d_stats = _component_stats(double_data, invalid_samples=invalid_samples)
+            s_stats = _component_stats(single_data, invalid_samples=invalid_samples)
             double_stats[component] = d_stats
             single_stats[component] = s_stats
             double_tke_terms.append(d_stats.fluctuation_variance)
             single_tke_terms.append(s_stats.fluctuation_variance)
 
-            both_valid = (double_data != 0.0) & (single_data != 0.0)
+            both_valid = valid_component_samples(
+                double_data, invalid_samples
+            ) & valid_component_samples(single_data, invalid_samples)
             double_fluct = double_data - d_stats.mean[None, :, :, :]
             single_fluct = single_data - s_stats.mean[None, :, :, :]
             fluct_abs_diff = np.abs(double_fluct - single_fluct)[both_valid]
@@ -272,6 +277,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=90.0,
         help="half-width in mm; default gives a 180 mm cube",
     )
+    parser.add_argument(
+        "--invalid-samples",
+        choices=INVALID_SAMPLE_MODES,
+        default="zero",
+        help=(
+            "raw samples to exclude from statistics: zero ignores exact zeros, "
+            "nan ignores NaN/inf values, zero-or-nan ignores both, none excludes nothing"
+        ),
+    )
     parser.add_argument("--output", type=Path, default=None)
     return parser
 
@@ -285,6 +299,7 @@ def main() -> None:
         z_center=args.z_center,
         half_width=args.half_width,
         x_center=args.x_center,
+        invalid_samples=args.invalid_samples,
     )
     print(report)
     if args.output is not None:

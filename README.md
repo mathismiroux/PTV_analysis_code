@@ -304,8 +304,8 @@ a `b128` raw file with a `b96` temporal average.
 
 ### Compute A Temporal Average
 
-Create a 3D mean velocity volume from a raw 4D time series. Exact-zero values
-are ignored in the average.
+Create a 3D mean velocity volume from a raw 4D time series. By default,
+exact-zero samples are ignored in the average.
 
 ```powershell
 python main.py "path\to\raw_file.nc" --temporal-average --output outputs\temporal_mean.nc
@@ -323,6 +323,10 @@ Options:
   `u`, `v`, and `w`.
 - `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
   exactly zero.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which raw samples are
+  treated as missing. The default is `zero`, matching the current DaVis export.
+  Use `nan` when missing values are exported as `NaN`, or `zero-or-nan` during
+  a transition period where both conventions may appear.
 - `--min-valid-fraction F`: discard averaged values with fewer than this
   fraction of valid time samples. Use `--min-valid-fraction 0.8` to require
   80 percent valid data at each voxel/component.
@@ -339,7 +343,8 @@ metadata such as `case_id`, `motion_type`, `u_inf`, `rotor_diameter`,
 Processed files store provenance metadata in the file attributes and in a
 `provenance` group, including the source file path, source file name, source
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
-valid-count settings.
+valid-count settings. They also store the `invalid_samples` mode used for the
+analysis.
 
 ### Compute Turbulent Kinetic Energy
 
@@ -359,9 +364,8 @@ k = 0.5 * (mean(u_prime^2) + mean(v_prime^2) + mean(w_prime^2))
 ```
 
 where `u_prime = u - u_mean`, `v_prime = v - v_mean`, and
-`w_prime = w - w_mean` at each voxel. Exact-zero raw samples are ignored using
-the same `--zero-mask component` or `--zero-mask vector` modes as temporal
-averaging.
+`w_prime = w - w_mean` at each voxel. Missing raw samples are ignored using the
+same `--zero-mask` and `--invalid-samples` modes as temporal averaging.
 
 Options:
 
@@ -377,6 +381,8 @@ Options:
   `u`, `v`, and `w`.
 - `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
   exactly zero.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose whether missing raw
+  samples are exact zeros, `NaN`/infinite values, both, or nothing.
 
 The output file contains `x`, `y`, `z`, `u_prime2_mean`, `v_prime2_mean`,
 `w_prime2_mean`, component counts, and `tke`. Provenance metadata records both
@@ -403,9 +409,8 @@ The available components are `uu`, `uv`, `uw`, `vv`, `vw`, and `ww`, where:
 uv = mean(u_prime * v_prime)
 ```
 
-and similarly for the other components. Exact-zero raw samples are ignored
-using the same `--zero-mask component` or `--zero-mask vector` modes as
-temporal averaging.
+and similarly for the other components. Missing raw samples are ignored using
+the same `--zero-mask` and `--invalid-samples` modes as temporal averaging.
 
 Options:
 
@@ -424,6 +429,8 @@ Options:
   component used in a stress product.
 - `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
   exactly zero.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose whether missing raw
+  samples are exact zeros, `NaN`/infinite values, both, or nothing.
 
 The output file contains `x`, `y`, `z`, one `{component}_reynolds_stress`
 dataset for each requested component, and matching `{component}_count`
@@ -447,6 +454,51 @@ writes a new file. The source average file is not modified.
 
 This command also refuses to overwrite existing outputs unless `--overwrite`
 is passed.
+
+### Compare Raw Export Planes
+
+Before choosing which DaVis/export parameters to use, compare the temporal mean
+and standard deviation on matching planes from several raw exports:
+
+```powershell
+python scripts\compare_export_planes.py Static_3.5D__b128.nc Static_3.5D__b128f.nc --labels b128 b128f --output outputs\export_planes_speed.png
+```
+
+By default, the script compares `speed` on three planes:
+
+- two planes perpendicular to the streamwise direction, at one-third and
+  two-thirds of the common overlapping `x` range
+- one streamwise-vertical plane, centered in the common overlapping `y` range
+
+The output figure has one row per export. For each plane it shows the temporal
+mean and temporal standard deviation with shared color scales.
+When the command starts, it prints all received arguments and all defaults used,
+including the resolved default plane coordinates and nearest plane indices for
+each file.
+
+If two exports have different physical overlap, use difference mode to project
+one export onto the other export's plane grid over the common domain:
+
+```powershell
+python scripts\compare_export_planes.py b96.nc b128.nc --labels b96 b128 --quantity speed --difference --reference-grid second --output outputs\b128_minus_b96_planes.png
+```
+
+In this mode the figure shows, for each plane, the reference field, the
+comparison field interpolated onto the reference grid, and the difference.
+Values outside the common overlap are not extrapolated.
+
+Useful options:
+
+- `--quantity {speed,u,v,w}`: choose what to compare.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which raw samples are
+  excluded from the temporal mean and standard deviation.
+- `--x-planes X1 X2`: choose the two streamwise-normal planes manually.
+- `--y-plane Y`: choose the streamwise-vertical plane manually.
+- `--labels name1 name2 ...`: display names for each export.
+- `--difference`: for two files, plot projected differences on a shared grid.
+- `--reference-grid {first,second}`: choose which file supplies the plotted
+  grid in difference mode.
+- `--output path.png`: output figure path.
 
 ### Visualize A Temporal-Average Volume
 
@@ -487,7 +539,8 @@ python scripts\compare_precision_fluctuations.py --output outputs\precision_fluc
 By default, the cube is centered at `y = 600 mm`, the center of the `x` range,
 and `z = 0 mm`, with a half-width of `90 mm` in every direction. This gives a
 180 mm x 180 mm x 180 mm analysis volume. Use `--half-width 30` for the
-original 60 mm cube.
+original 60 mm cube. Use `--invalid-samples {zero,nan,zero-or-nan,none}` to
+choose which raw samples are excluded from the fluctuation statistics.
 
 ## Optional Editable Install
 

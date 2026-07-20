@@ -10,6 +10,11 @@ import h5py
 import numpy as np
 
 from ptv_flow.reader import COORDINATES, VELOCITY_COMPONENTS, FlowDataset
+from ptv_flow.validity import (
+    valid_component_samples,
+    valid_vector_samples,
+    validate_invalid_samples,
+)
 
 REYNOLDS_STRESS_COMPONENTS = ("uu", "uv", "uw", "vv", "vw", "ww")
 
@@ -174,8 +179,9 @@ def temporal_average_volume(
     overwrite: bool = False,
     u_inf: float | None = None,
     metadata: Mapping[str, str | float] | None = None,
+    invalid_samples: str = "zero",
 ) -> Path:
-    """Compute temporal mean velocity fields while ignoring exact zeros.
+    """Compute temporal mean velocity fields while excluding invalid samples.
 
     Parameters
     ----------
@@ -198,12 +204,16 @@ def temporal_average_volume(
         Free-stream velocity used to store wake-deficit products.
     metadata:
         Optional case metadata stored as file attributes.
+    invalid_samples:
+        Which raw samples are excluded: ``zero``, ``nan``, ``zero-or-nan``,
+        or ``none``.
     """
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if zero_mask not in {"component", "vector"}:
         raise ValueError("zero_mask must be 'component' or 'vector'")
+    validate_invalid_samples(invalid_samples)
     if not 0.0 <= min_valid_fraction <= 1.0:
         raise ValueError("min_valid_fraction must be between 0 and 1")
 
@@ -223,6 +233,7 @@ def temporal_average_volume(
     print(
         f"Computing temporal average over {flow.n_times} time steps, "
         f"grid={flow.grid_shape}, zero_mask={zero_mask}, "
+        f"invalid_samples={invalid_samples}, "
         f"chunk_size={chunk_size}, min_valid_fraction={min_valid_fraction:g} "
         f"(min_count={min_valid_count})",
         flush=True,
@@ -236,16 +247,14 @@ def temporal_average_volume(
                 name: flow._file[name][start:stop, :, :, :]
                 for name in VELOCITY_COMPONENTS
             }
-            valid = np.logical_not(
-                (chunks["u"] == 0.0) & (chunks["v"] == 0.0) & (chunks["w"] == 0.0)
-            )
+            valid = valid_vector_samples(chunks, invalid_samples)
             for name, data in chunks.items():
                 sums[name] += np.where(valid, data, 0.0).sum(axis=0, dtype=np.float64)
                 counts[name] += valid.sum(axis=0, dtype=np.uint32)
         else:
             for name in VELOCITY_COMPONENTS:
                 data = flow._file[name][start:stop, :, :, :]
-                valid = data != 0.0
+                valid = valid_component_samples(data, invalid_samples)
                 sums[name] += np.where(valid, data, 0.0).sum(axis=0, dtype=np.float64)
                 counts[name] += valid.sum(axis=0, dtype=np.uint32)
 
@@ -285,8 +294,9 @@ def temporal_average_volume(
             out.attrs["source_file_size_bytes"] = source_path.stat().st_size
             out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
             out.attrs["created_by"] = "ptv-flow"
-            out.attrs["operation"] = "temporal_average_volume_ignore_exact_zeros"
+            out.attrs["operation"] = "temporal_average_volume"
             out.attrs["zero_mask"] = zero_mask
+            out.attrs["invalid_samples"] = invalid_samples
             out.attrs["chunk_size"] = chunk_size
             out.attrs["min_valid_fraction"] = min_valid_fraction
             out.attrs["min_valid_count"] = min_valid_count
@@ -299,6 +309,7 @@ def temporal_average_volume(
             provenance.attrs["created_utc"] = out.attrs["created_utc"]
             provenance.attrs["operation"] = out.attrs["operation"]
             provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["invalid_samples"] = invalid_samples
             provenance.attrs["chunk_size"] = chunk_size
             provenance.attrs["min_valid_fraction"] = min_valid_fraction
             provenance.attrs["min_valid_count"] = min_valid_count
@@ -499,18 +510,21 @@ def turbulent_kinetic_energy(
     zero_mask: str = "component",
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
+    invalid_samples: str = "zero",
 ) -> Path:
     """Compute turbulent kinetic energy from raw velocities and mean velocities.
 
     The output stores component fluctuation variances and
     ``tke = 0.5 * (u_prime2_mean + v_prime2_mean + w_prime2_mean)``.
-    Exact-zero raw values are ignored using the requested zero mask.
+    Raw values are ignored using the requested zero mask and invalid-sample
+    mode.
     """
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if zero_mask not in {"component", "vector"}:
         raise ValueError("zero_mask must be 'component' or 'vector'")
+    validate_invalid_samples(invalid_samples)
 
     _validate_mean_compatible(flow, mean)
     output, temporary_output = _prepare_output_path(output, overwrite)
@@ -532,7 +546,8 @@ def turbulent_kinetic_energy(
     print(f"Reading mean velocity file: {mean.path.resolve()}", flush=True)
     print(
         f"Computing turbulent kinetic energy over {flow.n_times} time steps, "
-        f"grid={flow.grid_shape}, zero_mask={zero_mask}, chunk_size={chunk_size}",
+        f"grid={flow.grid_shape}, zero_mask={zero_mask}, "
+        f"invalid_samples={invalid_samples}, chunk_size={chunk_size}",
         flush=True,
     )
 
@@ -544,9 +559,7 @@ def turbulent_kinetic_energy(
                 name: flow._file[name][start:stop, :, :, :]
                 for name in VELOCITY_COMPONENTS
             }
-            vector_valid = np.logical_not(
-                (chunks["u"] == 0.0) & (chunks["v"] == 0.0) & (chunks["w"] == 0.0)
-            )
+            vector_valid = valid_vector_samples(chunks, invalid_samples)
             for name, data in chunks.items():
                 valid = vector_valid & np.isfinite(mean_fields[name])[None, :, :, :]
                 fluctuation = data - mean_fields[name][None, :, :, :]
@@ -557,7 +570,9 @@ def turbulent_kinetic_energy(
         else:
             for name in VELOCITY_COMPONENTS:
                 data = flow._file[name][start:stop, :, :, :]
-                valid = (data != 0.0) & np.isfinite(mean_fields[name])[None, :, :, :]
+                valid = valid_component_samples(data, invalid_samples) & np.isfinite(
+                    mean_fields[name]
+                )[None, :, :, :]
                 fluctuation = data - mean_fields[name][None, :, :, :]
                 sum_squares[name] += np.where(valid, fluctuation * fluctuation, 0.0).sum(
                     axis=0, dtype=np.float64
@@ -602,6 +617,7 @@ def turbulent_kinetic_energy(
             out.attrs["operation"] = "turbulent_kinetic_energy"
             out.attrs["formula"] = "0.5 * (mean(u_prime^2) + mean(v_prime^2) + mean(w_prime^2))"
             out.attrs["zero_mask"] = zero_mask
+            out.attrs["invalid_samples"] = invalid_samples
             out.attrs["chunk_size"] = chunk_size
             out.attrs["input_shape_time_z_y_x"] = flow.shape
 
@@ -614,6 +630,7 @@ def turbulent_kinetic_energy(
             provenance.attrs["created_utc"] = out.attrs["created_utc"]
             provenance.attrs["operation"] = out.attrs["operation"]
             provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["invalid_samples"] = invalid_samples
             provenance.attrs["chunk_size"] = chunk_size
 
             for name in COORDINATES:
@@ -677,6 +694,7 @@ def reynolds_stresses(
     zero_mask: str = "component",
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
+    invalid_samples: str = "zero",
 ) -> Path:
     """Compute selected Reynolds stress components from raw and mean velocities.
 
@@ -688,6 +706,7 @@ def reynolds_stresses(
         raise ValueError("chunk_size must be positive")
     if zero_mask not in {"component", "vector"}:
         raise ValueError("zero_mask must be 'component' or 'vector'")
+    validate_invalid_samples(invalid_samples)
 
     selected_components = _normalize_reynolds_stress_components(components)
     _validate_mean_compatible(flow, mean)
@@ -711,7 +730,8 @@ def reynolds_stresses(
     print(
         f"Computing Reynolds stresses {', '.join(selected_components)} over "
         f"{flow.n_times} time steps, grid={flow.grid_shape}, "
-        f"zero_mask={zero_mask}, chunk_size={chunk_size}",
+        f"zero_mask={zero_mask}, invalid_samples={invalid_samples}, "
+        f"chunk_size={chunk_size}",
         flush=True,
     )
 
@@ -731,15 +751,14 @@ def reynolds_stresses(
             for name in VELOCITY_COMPONENTS
         }
         if zero_mask == "vector":
-            vector_valid = np.logical_not(
-                (chunks["u"] == 0.0) & (chunks["v"] == 0.0) & (chunks["w"] == 0.0)
-            )
+            vector_valid = valid_vector_samples(chunks, invalid_samples)
             valid_by_component = {
                 name: vector_valid & finite_mean[name] for name in VELOCITY_COMPONENTS
             }
         else:
             valid_by_component = {
-                name: (chunks[name] != 0.0) & finite_mean[name]
+                name: valid_component_samples(chunks[name], invalid_samples)
+                & finite_mean[name]
                 for name in VELOCITY_COMPONENTS
             }
 
@@ -792,6 +811,7 @@ def reynolds_stresses(
                 selected_components, dtype=h5py.string_dtype()
             )
             out.attrs["zero_mask"] = zero_mask
+            out.attrs["invalid_samples"] = invalid_samples
             out.attrs["chunk_size"] = chunk_size
             out.attrs["input_shape_time_z_y_x"] = flow.shape
 
@@ -807,6 +827,7 @@ def reynolds_stresses(
                 selected_components, dtype=h5py.string_dtype()
             )
             provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["invalid_samples"] = invalid_samples
             provenance.attrs["chunk_size"] = chunk_size
 
             for name in COORDINATES:

@@ -8,6 +8,7 @@ import numpy as np
 
 from ptv_flow.postprocess import TemporalAverageVolume
 from ptv_flow.reader import FlowDataset
+from ptv_flow.validity import valid_component_samples
 from ptv_flow.visualize import _draw_xy_vector_plane
 
 
@@ -45,9 +46,9 @@ def nearest_index(values: np.ndarray, value: float) -> int:
 
 
 def component_mean_ignoring_zero(
-    series: np.ndarray, min_valid_count: int = 1
+    series: np.ndarray, min_valid_count: int = 1, invalid_samples: str = "zero"
 ) -> ComponentMean:
-    valid = series != 0.0
+    valid = valid_component_samples(series, invalid_samples)
     count = int(valid.sum())
     if count == 0 or count < min_valid_count:
         return ComponentMean(mean=float("nan"), count=count, accepted=False)
@@ -55,12 +56,18 @@ def component_mean_ignoring_zero(
 
 
 def _valid_counts_for_z_plane(
-    flow: FlowDataset, z_index: int
+    flow: FlowDataset, z_index: int, invalid_samples: str = "zero"
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (
-        (flow._file["u"][:, z_index, :, :] != 0.0).sum(axis=0),
-        (flow._file["v"][:, z_index, :, :] != 0.0).sum(axis=0),
-        (flow._file["w"][:, z_index, :, :] != 0.0).sum(axis=0),
+        valid_component_samples(
+            flow._file["u"][:, z_index, :, :], invalid_samples
+        ).sum(axis=0),
+        valid_component_samples(
+            flow._file["v"][:, z_index, :, :], invalid_samples
+        ).sum(axis=0),
+        valid_component_samples(
+            flow._file["w"][:, z_index, :, :], invalid_samples
+        ).sum(axis=0),
     )
 
 
@@ -125,6 +132,7 @@ def inspect_cell(
     x_index: int,
     average: TemporalAverageVolume | None = None,
     min_valid_count: int = 1,
+    invalid_samples: str = "zero",
 ) -> CellInspection:
     if time_index < 0:
         time_index += flow.n_times
@@ -221,14 +229,17 @@ def inspect_cell(
         computed_u=component_mean_ignoring_zero(
             flow._file["u"][:, z_index, y_index, x_index],
             min_valid_count=min_valid_count,
+            invalid_samples=invalid_samples,
         ),
         computed_v=component_mean_ignoring_zero(
             flow._file["v"][:, z_index, y_index, x_index],
             min_valid_count=min_valid_count,
+            invalid_samples=invalid_samples,
         ),
         computed_w=component_mean_ignoring_zero(
             flow._file["w"][:, z_index, y_index, x_index],
             min_valid_count=min_valid_count,
+            invalid_samples=invalid_samples,
         ),
         average_u=average_u,
         average_v=average_v,
@@ -299,6 +310,7 @@ def inspect_flow_gui(
     initial_z: float = 0.0,
     quiver_step: int = 3,
     min_valid_fraction: float = 0.0,
+    invalid_samples: str = "zero",
 ) -> None:
     """Interactive visual inspection of raw values and temporal means."""
 
@@ -385,7 +397,9 @@ def inspect_flow_gui(
     def current_min_valid_count() -> int:
         return max(int(np.ceil(float(valid_slider.val) * flow.n_times)), 1)
 
-    counts_for_fixed_z = _valid_counts_for_z_plane(flow, z_index)
+    counts_for_fixed_z = _valid_counts_for_z_plane(
+        flow, z_index, invalid_samples=invalid_samples
+    )
 
     def refresh() -> None:
         nonlocal frame_index
@@ -416,6 +430,7 @@ def inspect_flow_gui(
             x_index=selected_x_index,
             average=average,
             min_valid_count=min_valid_count,
+            invalid_samples=invalid_samples,
         )
         info.set_text(
             format_cell_inspection(

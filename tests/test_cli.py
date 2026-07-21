@@ -6,6 +6,9 @@ from pathlib import Path
 
 import h5py
 
+from ptv_flow.cli import _invalid_samples_from_average
+from ptv_flow.postprocess import TemporalAverageVolume
+
 
 def test_cli_help_runs():
     result = subprocess.run(
@@ -58,6 +61,22 @@ def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_pa
     assert "--average-file is only used with --compare-average" in (
         result.stdout + result.stderr
     )
+
+
+def test_cli_compare_inspect_uses_average_invalid_samples_metadata(tmp_path):
+    average_file = tmp_path / "mean.nc"
+    with h5py.File(average_file, "w") as h5:
+        h5.attrs["invalid_samples"] = "zero-or-nan"
+        h5.create_dataset("x", data=[0.0])
+        h5.create_dataset("y", data=[0.0])
+        h5.create_dataset("z", data=[0.0])
+        h5.create_dataset("u_mean", data=[[[1.0]]])
+        h5.create_dataset("v_mean", data=[[[1.0]]])
+        h5.create_dataset("w_mean", data=[[[1.0]]])
+
+    with TemporalAverageVolume(average_file) as average:
+        assert _invalid_samples_from_average(average, None) == "zero-or-nan"
+        assert _invalid_samples_from_average(average, "zero") == "zero"
 
 
 def test_cli_summarizes_tiny_fixture(tiny_flow_path):

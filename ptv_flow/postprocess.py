@@ -276,11 +276,13 @@ def temporal_average_volume(
     )
     wake_deficit = None
     wake_mask_u09 = None
+    u_over_u_inf = None
     if u_inf is not None:
         if u_inf == 0.0:
             raise ValueError("u_inf must be non-zero")
+        u_over_u_inf = means["u"] / float(u_inf)
         wake_deficit = (float(u_inf) - means["u"]) / float(u_inf)
-        wake_mask_u09 = means["u"] / float(u_inf) < 0.9
+        wake_mask_u09 = u_over_u_inf < 0.9
 
     try:
         with h5py.File(temporary_output, "w") as out:
@@ -343,7 +345,23 @@ def temporal_average_volume(
                 compression="gzip",
                 compression_opts=4,
             )
-            if wake_deficit is not None and wake_mask_u09 is not None:
+            out.create_dataset(
+                "abs_U",
+                data=speed_from_mean,
+                compression="gzip",
+                compression_opts=4,
+            )
+            if (
+                wake_deficit is not None
+                and wake_mask_u09 is not None
+                and u_over_u_inf is not None
+            ):
+                out.create_dataset(
+                    "u_over_u_inf",
+                    data=u_over_u_inf,
+                    compression="gzip",
+                    compression_opts=4,
+                )
                 out.create_dataset(
                     "wake_deficit",
                     data=wake_deficit,

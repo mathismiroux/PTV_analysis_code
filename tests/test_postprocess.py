@@ -79,6 +79,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         assert out.attrs["zero_mask"] == "component"
         assert out.attrs["invalid_samples"] == "zero"
         assert set(out.keys()) == {
+            "abs_U",
             "provenance",
             "speed_from_mean",
             "u_count",
@@ -110,6 +111,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         np.testing.assert_allclose(
             out["speed_from_mean"][:], expected_speed, equal_nan=True
         )
+        np.testing.assert_allclose(out["abs_U"][:], expected_speed, equal_nan=True)
 
 
 def test_temporal_average_writes_wake_products_and_case_metadata(
@@ -141,7 +143,13 @@ def test_temporal_average_writes_wake_products_and_case_metadata(
         assert out.attrs["u_inf"] == 4.0
         assert out["provenance"].attrs["case_id"] == "tiny_static_x3p5d"
 
+        expected_u_over_u_inf = out["u_mean"][:] / 4.0
         expected_wake_deficit = (4.0 - out["u_mean"][:]) / 4.0
+        np.testing.assert_allclose(
+            out["u_over_u_inf"][:],
+            expected_u_over_u_inf,
+            equal_nan=True,
+        )
         np.testing.assert_allclose(
             out["wake_deficit"][:],
             expected_wake_deficit,

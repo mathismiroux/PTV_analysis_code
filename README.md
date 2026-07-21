@@ -15,6 +15,27 @@ u/v/w shape       (time, z, y, x)
 The reader is lazy: it reads one frame or one `z` plane at a time instead of
 loading the full multi-GB dataset into memory.
 
+## Coordinate System
+
+The physical coordinate convention used throughout this repository is:
+
+```text
+x: streamwise direction
+y: vertical direction
+z: lateral direction completing the right-handed coordinate system
+```
+
+The NetCDF velocity arrays are still stored in memory/file order as
+`(time, z, y, x)`. That storage order does not change the physical meaning of
+the coordinates.
+
+For wake plots:
+
+- `--rotor-y` is the vertical rotor-axis coordinate.
+- `--rotor-z` is the lateral rotor-axis coordinate.
+- `--plane-axis z` selects a constant lateral plane and plots vertical profiles.
+- `--plane-axis y` selects a constant vertical plane and plots lateral profiles.
+
 ## Quick Start
 
 From a fresh clone, create a virtual environment and install the dependencies:
@@ -302,6 +323,62 @@ The comparison file must have the same grid shape and `x`, `y`, `z`
 coordinates as the raw file. This prevents accidentally comparing, for example,
 a `b128` raw file with a `b96` temporal average.
 
+### Prepare Mean Wake Products For Figures
+
+Before plotting paper figures, create reusable 3D mean wake files for every raw
+velocity NetCDF file in a folder. This keeps expensive averaging separate from
+plotting:
+
+```powershell
+python scripts\prepare_mean_wake_products.py "D:\my_case_exports" --output-name mean_wake_figure1_dryrun --dry-run
+python scripts\prepare_mean_wake_products.py "D:\my_case_exports" --output-name mean_wake_figure1_001 --invalid-samples zero-or-nan --min-valid-fraction 0.8 --chunk-size 50
+```
+
+You must provide either `--output-name` or `--output-root`. The output folder
+must not already exist; this analysis refuses to write into an existing folder,
+including with `--overwrite`. Choose a new run name for every processing
+attempt.
+
+With `--output-name`, outputs are written next to the input folder:
+
+```text
+D:\
+  my_case_exports\
+    case_a.nc
+    case_b.nc
+  outputs\
+    mean_wake_figure1\
+      case_a\mean.nc
+      case_b\mean.nc
+      manifest.csv
+      manifest.json
+```
+
+Each `mean.nc` contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
+`speed_from_mean`, `abs_U`, `u_count`, `v_count`, `w_count`, `u_over_u_inf`,
+`wake_deficit`, and `wake_mask_u09` when `--u-inf` is provided. File attributes
+and the manifest record the source file, command line, invalid-sample policy,
+zero-mask mode, chunk size, minimum valid fraction, and overwrite setting.
+
+Useful options:
+
+- `--pattern "*.nc"`: choose which files in the input folder are processed.
+- `--output-name NAME`: required unless `--output-root` is used; write to
+  `..\outputs\NAME` relative to the input folder. `NAME` must be new.
+- `--output-root path`: explicitly choose the output folder. The folder must
+  be new.
+- `--dry-run`: write the manifest and show what would be processed.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which raw samples are
+  excluded.
+- `--zero-mask {component,vector}`: choose independent component masking or
+  whole-vector masking.
+- `--min-valid-fraction F`: set means to `NaN` if too few samples are valid.
+- `--chunk-size N`: number of time frames loaded at once.
+- `--u-inf 4.0`: free-stream velocity used for wake-recovery products.
+- `--overwrite`: only passed through to individual file writing after the new
+  output folder has been accepted. It does not allow reusing an existing output
+  folder.
+
 ### Compute A Temporal Average
 
 Create a 3D mean velocity volume from a raw 4D time series. By default,
@@ -345,6 +422,107 @@ Processed files store provenance metadata in the file attributes and in a
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings. They also store the `invalid_samples` mode used for the
 analysis.
+
+### Plot Mean Wake Z-Plane Composites
+
+After `prepare_mean_wake_products.py` has created reusable `mean.nc` files, plot
+the `z=0` mean wake plane for all files in one prepared output folder:
+
+```powershell
+python scripts\plot_mean_wake_z0.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures\figure1_mean_wake_z0_001" --z 0 --quantity u_over_u_inf
+```
+
+The plotting output folder must be new. The script refuses to write into an
+existing folder. Each group writes a PNG and a small plot manifest CSV.
+
+All plots created by one command use the same colorbar range, computed from all
+loaded `mean.nc` files before any group is plotted. This makes the generated
+case figures visually comparable. To force an identical scale across separate
+plotting runs, pass explicit limits:
+
+```powershell
+python scripts\plot_mean_wake_z0.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures\figure1_mean_wake_z0_002" --z 0 --quantity u_over_u_inf --vmin 0 --vmax 1
+```
+
+Use `outputs\figures\...` for final/reproducible figure folders, and keep
+processed intermediate data in sibling folders such as
+`outputs\test_mean_wake_results\...`.
+
+Files are grouped by case name inferred from labels such as
+`Static_1D__b64...` and `Static_1.625D__b64...`; those become one `Static`
+figure with multiple downstream stations. Volumes are ordered upstream to
+downstream by the distance in `D`. If downstream volumes overlap earlier
+volumes, overlapping downstream cells are masked so the upstream values are
+kept. The overlapped footprint is shaded transparently on the plot.
+
+Useful quantities:
+
+- `u_over_u_inf`: default wake recovery plot.
+- `wake_deficit`: normalized streamwise deficit.
+- `abs_U` or `speed_from_mean`: mean velocity magnitude.
+- `u_mean`, `v_mean`, `w_mean`: component means.
+
+### Plot Radial Wake Deficit
+
+Use the full 3D averaged volume to make a radius-versus-`x` wake-deficit plot.
+Here `x` is streamwise, `y` is vertical, and `z` is the lateral direction that
+completes the right-handed coordinate system. This averages all voxels in
+annular bins around the rotor axis in the vertical-lateral `y-z` plane:
+
+```powershell
+python scripts\plot_radial_wake_deficit.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures\figure1_radial_wake_deficit_001" --rotor-y 0 --rotor-z 0 --radial-bin-width 25 --invalid-samples zero-or-nan --contour-step 0.05 --contour-label-step 0.1
+```
+
+The plotting output folder must be new. The script refuses to write into an
+existing folder.
+
+`--rotor-y` and `--rotor-z` are required and must be given in the same
+coordinate units as the `mean.nc` file, usually millimetres for the current
+DaVis exports. `--rotor-y` is the vertical hub coordinate. `--rotor-z` is the
+lateral hub coordinate.
+For each voxel, the plotted quantity is:
+
+```text
+(U_inf - u_mean) / U_inf
+```
+
+By default, exact zeros and `NaN` values are excluded before radial averaging.
+Use `--invalid-samples none` only when you explicitly want to use every value
+exported by DaVis. Use `--require-all-components` when a voxel should be used
+only if `u_mean`, `v_mean`, and `w_mean` are all valid.
+
+Contour lines are drawn every `0.05` wake-deficit units by default, with
+numeric labels every `0.1`. Use `--contour-step 0` to disable contours, or
+`--contour-label-step 0` to keep contour lines without numeric labels.
+
+As with the `z=0` composite plot, files are grouped by case and ordered by
+downstream distance. If downstream volumes overlap earlier volumes, overlapping
+downstream `x` columns are masked so upstream values are kept. The overlapped
+columns are shaded transparently on the plot.
+
+### Plot Plane Wake-Deficit Profiles
+
+To make a figure closer to a paper-style wake recovery profile plot, take one
+selected plane from each mean volume and extract a 1D deficit profile at the
+centre of each volume:
+
+```powershell
+python scripts\plot_plane_wake_deficit_profiles.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures\figure1_plane_profiles_001" --plane-axis z --plane-value 0 --rotor-y 400 --rotor-diameter 1200 --invalid-samples zero-or-nan
+```
+
+For `--plane-axis z`, the script uses the nearest `z` plane and plots the
+deficit against `(y - y_rotor) / D`, where `y` is vertical. Pass `--rotor-y`
+for this case. For `--plane-axis y`, it uses the nearest `y` plane and plots
+against `(z - z_rotor) / D`, where `z` is lateral. Pass `--rotor-z` for this
+case. The streamwise profile location is the centre of each volume by default;
+pass `--x-value` to force a specific `x`.
+
+The output folder must be new. The script writes the profile PNG, a manifest
+CSV, and a `*_data.csv` table with the plotted coordinate, normalized
+coordinate, wake deficit, validity flag, selected plane, and selected `x`.
+
+Exact-zero and `NaN` mean values are excluded by default through
+`--invalid-samples zero-or-nan`.
 
 ### Compute Turbulent Kinetic Energy
 

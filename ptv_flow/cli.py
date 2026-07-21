@@ -320,11 +320,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--invalid-samples",
         choices=INVALID_SAMPLE_MODES,
-        default="zero",
+        default=None,
         help=(
             "raw samples to exclude from statistics: zero ignores exact zeros "
-            "(current default), nan ignores NaN/inf values, zero-or-nan ignores "
-            "both, none excludes nothing"
+            "(default unless --inspect --compare-average can read a different "
+            "policy from --average-file), nan ignores NaN/inf values, "
+            "zero-or-nan ignores both, none excludes nothing"
         ),
     )
     parser.add_argument(
@@ -339,8 +340,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _invalid_samples_from_average(
+    average: TemporalAverageVolume,
+    explicit_invalid_samples: str | None,
+) -> str:
+    if explicit_invalid_samples is not None:
+        return explicit_invalid_samples
+    stored = average._file.attrs.get("invalid_samples")
+    if stored is None:
+        return "zero"
+    stored_text = stored.decode() if isinstance(stored, bytes) else str(stored)
+    if stored_text not in INVALID_SAMPLE_MODES:
+        print(
+            f"Average file records unsupported invalid_samples={stored_text!r}; "
+            "falling back to 'zero'.",
+            flush=True,
+        )
+        return "zero"
+    print(
+        f"Using invalid_samples={stored_text!r} from average file metadata.",
+        flush=True,
+    )
+    return stored_text
+
+
 def main() -> None:
     args = build_parser().parse_args()
+    invalid_samples = args.invalid_samples or "zero"
     if args.case is not None and args.cases is not None:
         raise SystemExit("Use either --case or --cases, not both.")
 
@@ -379,7 +405,7 @@ def main() -> None:
                         zero_mask=args.zero_mask,
                         min_valid_fraction=args.min_valid_fraction,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                     _compute_case_tke(
                         flow_case=flow_case,
@@ -389,7 +415,7 @@ def main() -> None:
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                     _compute_case_reynolds_stresses(
                         flow_case=flow_case,
@@ -400,7 +426,7 @@ def main() -> None:
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                 except FileExistsError as exc:
                     raise SystemExit(str(exc)) from exc
@@ -471,7 +497,7 @@ def main() -> None:
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                 else:
                     with TemporalAverageVolume(mean_file) as mean:
@@ -483,7 +509,7 @@ def main() -> None:
                             chunk_size=args.chunk_size,
                             zero_mask=args.zero_mask,
                             overwrite=args.overwrite,
-                            invalid_samples=args.invalid_samples,
+                            invalid_samples=invalid_samples,
                         )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
@@ -512,7 +538,7 @@ def main() -> None:
                         chunk_size=args.chunk_size,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                 else:
                     with TemporalAverageVolume(mean_file) as mean:
@@ -523,7 +549,7 @@ def main() -> None:
                             chunk_size=args.chunk_size,
                             zero_mask=args.zero_mask,
                             overwrite=args.overwrite,
-                            invalid_samples=args.invalid_samples,
+                            invalid_samples=invalid_samples,
                         )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
@@ -547,7 +573,7 @@ def main() -> None:
                         zero_mask=args.zero_mask,
                         min_valid_fraction=args.min_valid_fraction,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
                 else:
                     temporal_average_volume(
@@ -557,7 +583,7 @@ def main() -> None:
                         zero_mask=args.zero_mask,
                         min_valid_fraction=args.min_valid_fraction,
                         overwrite=args.overwrite,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=invalid_samples,
                     )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
@@ -587,10 +613,14 @@ def main() -> None:
                     initial_z=args.z,
                     quiver_step=args.quiver_step,
                     min_valid_fraction=args.min_valid_fraction,
-                    invalid_samples=args.invalid_samples,
+                    invalid_samples=invalid_samples,
                 )
             else:
                 with TemporalAverageVolume(args.average_file) as average:
+                    inspect_invalid_samples = _invalid_samples_from_average(
+                        average,
+                        args.invalid_samples,
+                    )
                     inspect_flow_gui(
                         flow,
                         average=average,
@@ -598,7 +628,7 @@ def main() -> None:
                         initial_z=args.z,
                         quiver_step=args.quiver_step,
                         min_valid_fraction=args.min_valid_fraction,
-                        invalid_samples=args.invalid_samples,
+                        invalid_samples=inspect_invalid_samples,
                     )
         else:
             print(flow.describe())

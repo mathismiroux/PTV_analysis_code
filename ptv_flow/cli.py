@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
 
 from ptv_flow.cases import DEFAULT_CASES_FILE, FlowCase, load_case
@@ -10,6 +11,7 @@ from ptv_flow.postprocess import (
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
     reynolds_stresses,
+    spatio_temporal_interpolate_velocity,
     temporal_average_volume,
     turbulent_kinetic_energy,
 )
@@ -88,6 +90,35 @@ def _compute_case_tke(
             metadata=metadata,
             invalid_samples=invalid_samples,
         )
+
+
+def _compute_case_interpolated_velocity(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    output: Path,
+    axes: list[str],
+    min_spatial_neighbors: int,
+    passes: int,
+    max_temporal_gap: int | None,
+    workers: int,
+    zero_mask: str,
+    overwrite: bool,
+    invalid_samples: str,
+) -> Path:
+    metadata = _case_metadata(flow_case, output.parent.name)
+    return spatio_temporal_interpolate_velocity(
+        flow,
+        output=output,
+        axes=axes,
+        min_spatial_neighbors=min_spatial_neighbors,
+        passes=passes,
+        max_temporal_gap=max_temporal_gap,
+        workers=workers,
+        zero_mask=zero_mask,
+        overwrite=overwrite,
+        metadata=metadata,
+        invalid_samples=invalid_samples,
+    )
 
 
 def _compute_case_reynolds_stresses(
@@ -233,6 +264,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="compute a temporal average volume, excluding configured invalid samples",
     )
     parser.add_argument(
+        "--interpolate-velocity",
+        action="store_true",
+        help=(
+            "fill holes in the raw velocity time series using non-physics-informed "
+            "spatio-temporal interpolation"
+        ),
+    )
+    parser.add_argument(
+        "--interpolation-axes",
+        nargs="+",
+        choices=("t", "z", "y", "x"),
+        default=["t", "z", "y", "x"],
+        help=(
+            "axis order used by --interpolate-velocity; linear interpolation is "
+            "applied sequentially"
+        ),
+    )
+    parser.add_argument(
+        "--min-interpolation-neighbors",
+        type=int,
+        default=6,
+        help=(
+            "minimum number of valid 3D corner neighbors required around a "
+            "hole; default 6 means at least 6 out of the 8 surrounding "
+            "spatial cells at the same time"
+        ),
+    )
+    parser.add_argument(
+        "--interpolation-passes",
+        type=int,
+        default=1,
+        help=(
+            "maximum number of interpolation passes; later passes may use "
+            "values filled by earlier passes"
+        ),
+    )
+    parser.add_argument(
+        "--max-temporal-gap",
+        type=int,
+        default=None,
+        help=(
+            "maximum frame-index distance to the valid bracketing samples used "
+            "for temporal interpolation; omit for no temporal distance limit"
+        ),
+    )
+    parser.add_argument(
+        "--interpolation-workers",
+        type=int,
+        default=1,
+        help=(
+            "number of velocity components to interpolate concurrently; use 3 "
+            "to process u, v, and w in parallel if memory allows"
+        ),
+    )
+    parser.add_argument(
         "--postprocess-basic",
         action="store_true",
         help="for case workflows, compute mean.nc, tke.nc, and reynolds_stresses.nc",
@@ -292,6 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="temporal-average file to compare in --inspect mode",
     )
     parser.add_argument(
+        "--interpolated-file",
+        type=Path,
+        default=None,
+        help="interpolated raw-style velocity file to compare in --inspect mode",
+    )
+    parser.add_argument(
         "--mean-file",
         type=Path,
         default=None,
@@ -301,6 +393,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--compare-average",
         action="store_true",
         help="compare raw inspector values with --average-file",
+    )
+    parser.add_argument(
+        "--compare-interpolated",
+        action="store_true",
+        help=(
+            "compare raw inspector values with --interpolated-file and show "
+            "filled cells as transparent"
+        ),
     )
     parser.add_argument(
         "--chunk-size",
@@ -359,6 +459,30 @@ def _invalid_samples_from_average(
         return "zero"
     print(
         f"Using invalid_samples={stored_text!r} from average file metadata.",
+        flush=True,
+    )
+    return stored_text
+
+
+def _invalid_samples_from_interpolated(
+    interpolated: FlowDataset,
+    explicit_invalid_samples: str | None,
+) -> str:
+    if explicit_invalid_samples is not None:
+        return explicit_invalid_samples
+    stored = interpolated._file.attrs.get("invalid_samples")
+    if stored is None:
+        return "zero"
+    stored_text = stored.decode() if isinstance(stored, bytes) else str(stored)
+    if stored_text not in INVALID_SAMPLE_MODES:
+        print(
+            f"Interpolated file records unsupported invalid_samples={stored_text!r}; "
+            "falling back to 'zero'.",
+            flush=True,
+        )
+        return "zero"
+    print(
+        f"Using invalid_samples={stored_text!r} from interpolated file metadata.",
         flush=True,
     )
     return stored_text
@@ -438,6 +562,8 @@ def main() -> None:
         flow_case = load_case(args.case, args.cases_file)
         if args.temporal_average:
             flow_case.validate_for_temporal_average()
+        if args.interpolate_velocity:
+            flow_case.validate_for_temporal_average()
         raw_path = flow_case.require_velocity()
 
     if args.apply_valid_fraction is not None:
@@ -471,7 +597,47 @@ def main() -> None:
         return
 
     with FlowDataset(raw_path) as flow:
-        if args.reynolds_stress:
+        if args.interpolate_velocity:
+            output = args.output
+            if output is None:
+                if flow_case is not None:
+                    output = flow_case.default_output_path(
+                        "interpolated_velocity.nc",
+                        unique=not args.overwrite,
+                    )
+                else:
+                    output = Path("outputs") / f"{raw_path.stem}_interpolated.nc"
+            try:
+                if flow_case is not None:
+                    _compute_case_interpolated_velocity(
+                        flow_case=flow_case,
+                        flow=flow,
+                        output=output,
+                        axes=args.interpolation_axes,
+                        min_spatial_neighbors=args.min_interpolation_neighbors,
+                        passes=args.interpolation_passes,
+                        max_temporal_gap=args.max_temporal_gap,
+                        workers=args.interpolation_workers,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                        invalid_samples=invalid_samples,
+                    )
+                else:
+                    spatio_temporal_interpolate_velocity(
+                        flow,
+                        output=output,
+                        axes=args.interpolation_axes,
+                        min_spatial_neighbors=args.min_interpolation_neighbors,
+                        passes=args.interpolation_passes,
+                        max_temporal_gap=args.max_temporal_gap,
+                        workers=args.interpolation_workers,
+                        zero_mask=args.zero_mask,
+                        overwrite=args.overwrite,
+                        invalid_samples=invalid_samples,
+                    )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
+        elif args.reynolds_stress:
             if args.mean_file is None and flow_case is None:
                 raise SystemExit("--reynolds-stress requires --mean-file.")
             mean_file = args.mean_file
@@ -606,7 +772,13 @@ def main() -> None:
                 )
             if args.compare_average and args.average_file is None:
                 raise SystemExit("--compare-average requires --average-file.")
-            if not args.compare_average:
+            if args.interpolated_file is not None and not args.compare_interpolated:
+                raise SystemExit(
+                    "--interpolated-file is only used with --compare-interpolated."
+                )
+            if args.compare_interpolated and args.interpolated_file is None:
+                raise SystemExit("--compare-interpolated requires --interpolated-file.")
+            if not args.compare_average and not args.compare_interpolated:
                 inspect_flow_gui(
                     flow,
                     initial_frame=args.frame,
@@ -616,14 +788,32 @@ def main() -> None:
                     invalid_samples=invalid_samples,
                 )
             else:
-                with TemporalAverageVolume(args.average_file) as average:
-                    inspect_invalid_samples = _invalid_samples_from_average(
-                        average,
-                        args.invalid_samples,
-                    )
+                average_context = (
+                    TemporalAverageVolume(args.average_file)
+                    if args.compare_average
+                    else nullcontext(None)
+                )
+                interpolated_context = (
+                    FlowDataset(args.interpolated_file)
+                    if args.compare_interpolated
+                    else nullcontext(None)
+                )
+                with average_context as average, interpolated_context as interpolated:
+                    inspect_invalid_samples = invalid_samples
+                    if average is not None:
+                        inspect_invalid_samples = _invalid_samples_from_average(
+                            average,
+                            args.invalid_samples,
+                        )
+                    elif interpolated is not None:
+                        inspect_invalid_samples = _invalid_samples_from_interpolated(
+                            interpolated,
+                            args.invalid_samples,
+                        )
                     inspect_flow_gui(
                         flow,
                         average=average,
+                        interpolated=interpolated,
                         initial_frame=args.frame,
                         initial_z=args.z,
                         quiver_step=args.quiver_step,

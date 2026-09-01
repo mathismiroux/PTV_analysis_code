@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Button, Slider
 import numpy as np
 
 from ptv_flow.postprocess import TemporalAverageVolume
@@ -39,10 +39,21 @@ class CellInspection:
     average_u: ComponentMean | None = None
     average_v: ComponentMean | None = None
     average_w: ComponentMean | None = None
+    interpolated_u: float | None = None
+    interpolated_v: float | None = None
+    interpolated_w: float | None = None
+    interpolated_speed: float | None = None
+    filled_u: bool | None = None
+    filled_v: bool | None = None
+    filled_w: bool | None = None
 
 
 def nearest_index(values: np.ndarray, value: float) -> int:
     return int(np.nanargmin(np.abs(values - value)))
+
+
+def step_index(current: int, offset: int, upper: int) -> int:
+    return int(np.clip(current + offset, 0, upper))
 
 
 def component_mean_ignoring_zero(
@@ -100,6 +111,12 @@ def _rejected_overlay_rgba(accepted: np.ndarray) -> np.ndarray:
     return overlay
 
 
+def _filled_image_alpha(filled: np.ndarray, filled_alpha: float = 0.45) -> np.ndarray:
+    alpha = np.ones(filled.shape, dtype=float)
+    alpha[filled] = filled_alpha
+    return alpha
+
+
 def validate_average_compatible(
     flow: FlowDataset, average: TemporalAverageVolume
 ) -> None:
@@ -124,6 +141,54 @@ def validate_average_compatible(
             )
 
 
+def validate_interpolated_compatible(
+    flow: FlowDataset, interpolated: FlowDataset
+) -> None:
+    """Raise if an interpolated file cannot be compared with a raw file."""
+
+    if interpolated.shape != flow.shape:
+        raise ValueError(
+            "Interpolated file shape does not match raw file shape: "
+            f"{interpolated.shape} != {flow.shape}. "
+            f"raw={flow.path}, interpolated={interpolated.path}"
+        )
+
+    for name in ("t", "x", "y", "z"):
+        raw_values = flow.coordinate(name)
+        interpolated_values = interpolated.coordinate(name)
+        if raw_values.shape != interpolated_values.shape or not np.allclose(
+            raw_values, interpolated_values, equal_nan=True
+        ):
+            raise ValueError(
+                f"Interpolated file {name!r} coordinates do not match raw file. "
+                f"raw={flow.path}, interpolated={interpolated.path}"
+            )
+
+    missing_masks = [
+        f"{name}_filled_mask"
+        for name in ("u", "v", "w")
+        if f"{name}_filled_mask" not in interpolated._file
+    ]
+    if missing_masks:
+        raise ValueError(
+            "Interpolated file is missing filled-mask dataset(s): "
+            f"{', '.join(missing_masks)}"
+        )
+
+
+def _interpolated_filled_plane(
+    interpolated: FlowDataset,
+    time_index: int,
+    z_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    masks = tuple(
+        interpolated._file[f"{name}_filled_mask"][time_index, z_index, :, :].astype(bool)
+        for name in ("u", "v", "w")
+    )
+    any_filled = np.logical_or.reduce(masks)
+    return masks[0], masks[1], masks[2], any_filled
+
+
 def inspect_cell(
     flow: FlowDataset,
     time_index: int,
@@ -131,6 +196,7 @@ def inspect_cell(
     y_index: int,
     x_index: int,
     average: TemporalAverageVolume | None = None,
+    interpolated: FlowDataset | None = None,
     min_valid_count: int = 1,
     invalid_samples: str = "zero",
 ) -> CellInspection:
@@ -150,6 +216,34 @@ def inspect_cell(
     raw_u = float(flow._file["u"][time_index, z_index, y_index, x_index])
     raw_v = float(flow._file["v"][time_index, z_index, y_index, x_index])
     raw_w = float(flow._file["w"][time_index, z_index, y_index, x_index])
+
+    interpolated_u = None
+    interpolated_v = None
+    interpolated_w = None
+    interpolated_speed = None
+    filled_u = None
+    filled_v = None
+    filled_w = None
+    if interpolated is not None:
+        interpolated_u = float(interpolated._file["u"][time_index, z_index, y_index, x_index])
+        interpolated_v = float(interpolated._file["v"][time_index, z_index, y_index, x_index])
+        interpolated_w = float(interpolated._file["w"][time_index, z_index, y_index, x_index])
+        interpolated_speed = float(
+            np.sqrt(
+                interpolated_u * interpolated_u
+                + interpolated_v * interpolated_v
+                + interpolated_w * interpolated_w
+            )
+        )
+        filled_u = bool(
+            interpolated._file["u_filled_mask"][time_index, z_index, y_index, x_index]
+        )
+        filled_v = bool(
+            interpolated._file["v_filled_mask"][time_index, z_index, y_index, x_index]
+        )
+        filled_w = bool(
+            interpolated._file["w_filled_mask"][time_index, z_index, y_index, x_index]
+        )
 
     average_u = None
     average_v = None
@@ -244,12 +338,25 @@ def inspect_cell(
         average_u=average_u,
         average_v=average_v,
         average_w=average_w,
+        interpolated_u=interpolated_u,
+        interpolated_v=interpolated_v,
+        interpolated_w=interpolated_w,
+        interpolated_speed=interpolated_speed,
+        filled_u=filled_u,
+        filled_v=filled_v,
+        filled_w=filled_w,
     )
 
 
 def _format_mean(name: str, value: ComponentMean) -> str:
     status = "accepted" if value.accepted else "rejected"
     return f"  {name}_mean={value.mean:.9g}  count={value.count}  {status}"
+
+
+def _format_delta(interpolated: float, raw: float) -> str:
+    if not np.isfinite(raw):
+        return "n/a, raw missing"
+    return f"{interpolated - raw:.9g}"
 
 
 def format_cell_inspection(
@@ -300,12 +407,44 @@ def format_cell_inspection(
                 "  not active",
             ]
         )
+    if (
+        cell.interpolated_u is not None
+        and cell.interpolated_v is not None
+        and cell.interpolated_w is not None
+        and cell.interpolated_speed is not None
+    ):
+        lines.extend(
+            [
+                "",
+                "Value stored in interpolated file",
+                f"  u={cell.interpolated_u:.9g}  "
+                f"delta={_format_delta(cell.interpolated_u, cell.raw_u)}  "
+                f"filled={cell.filled_u}",
+                f"  v={cell.interpolated_v:.9g}  "
+                f"delta={_format_delta(cell.interpolated_v, cell.raw_v)}  "
+                f"filled={cell.filled_v}",
+                f"  w={cell.interpolated_w:.9g}  "
+                f"delta={_format_delta(cell.interpolated_w, cell.raw_w)}  "
+                f"filled={cell.filled_w}",
+                f"  speed={cell.interpolated_speed:.9g}  "
+                f"delta={_format_delta(cell.interpolated_speed, cell.raw_speed)}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Interpolated file comparison",
+                "  not active",
+            ]
+        )
     return "\n".join(lines)
 
 
 def inspect_flow_gui(
     flow: FlowDataset,
     average: TemporalAverageVolume | None = None,
+    interpolated: FlowDataset | None = None,
     initial_frame: int = 0,
     initial_z: float = 0.0,
     quiver_step: int = 3,
@@ -316,6 +455,8 @@ def inspect_flow_gui(
 
     if average is not None:
         validate_average_compatible(flow, average)
+    if interpolated is not None:
+        validate_interpolated_compatible(flow, interpolated)
     raw_label = flow.path.name
     if not 0.0 <= min_valid_fraction <= 1.0:
         raise ValueError("min_valid_fraction must be between 0 and 1")
@@ -327,11 +468,13 @@ def inspect_flow_gui(
     selected_y_index = len(y_values) // 2
     selected_x_index = len(x_values) // 2
 
-    first = flow.read_z_plane(frame_index, z_index)
+    first = (interpolated or flow).read_z_plane(frame_index, z_index)
     fig = plt.figure(figsize=(13, 8), constrained_layout=False)
     ax = fig.add_axes((0.06, 0.20, 0.58, 0.72))
     text_ax = fig.add_axes((0.68, 0.20, 0.29, 0.72))
+    prev_frame_ax = fig.add_axes((0.10, 0.112, 0.055, 0.04))
     frame_ax = fig.add_axes((0.18, 0.115, 0.39, 0.03))
+    next_frame_ax = fig.add_axes((0.585, 0.112, 0.055, 0.04))
     valid_ax = fig.add_axes((0.18, 0.07, 0.39, 0.03))
 
     image, quiver, q_slice = _draw_xy_vector_plane(
@@ -354,6 +497,7 @@ def inspect_flow_gui(
         interpolation="nearest",
         zorder=image.get_zorder() + 0.5,
     )
+    image.set_alpha(np.ones_like(first.speed, dtype=float))
     marker = ax.plot(
         [x_values[selected_x_index]],
         [y_values[selected_y_index]],
@@ -385,6 +529,8 @@ def inspect_flow_gui(
         valinit=frame_index,
         valstep=1,
     )
+    previous_frame_button = Button(prev_frame_ax, "<")
+    next_frame_button = Button(next_frame_ax, ">")
     valid_slider = Slider(
         valid_ax,
         "min valid frac",
@@ -405,7 +551,8 @@ def inspect_flow_gui(
         nonlocal frame_index
         frame_index = int(frame_slider.val)
         min_valid_count = current_min_valid_count()
-        plane = flow.read_z_plane(frame_index, z_index)
+        display_flow = interpolated or flow
+        plane = display_flow.read_z_plane(frame_index, z_index)
         display_speed, display_u, display_v, accepted = _apply_inspector_valid_mask(
             plane.speed,
             plane.u,
@@ -415,12 +562,27 @@ def inspect_flow_gui(
         )
         image.set_data(display_speed)
         rejected_overlay.set_data(_rejected_overlay_rgba(accepted))
+        if interpolated is not None:
+            _, _, _, any_filled = _interpolated_filled_plane(
+                interpolated,
+                frame_index,
+                z_index,
+            )
+            image.set_alpha(_filled_image_alpha(any_filled))
+        else:
+            image.set_alpha(np.ones_like(accepted, dtype=float))
         quiver.set_UVC(display_u[q_slice], display_v[q_slice])
         marker.set_data([x_values[selected_x_index]], [y_values[selected_y_index]])
         title.set_text(
-            f"Raw frame={frame_index}, t={plane.time:.6g}, "
+            f"{'Interpolated' if interpolated is not None else 'Raw'} frame={frame_index}, "
+            f"t={plane.time:.6g}, "
             f"z={plane.z_value:.6g} (z_index={z_index}), "
             f"shown accepted={int(accepted.sum())}/{accepted.size}"
+            + (
+                f", transparent filled cells={int(any_filled.sum())}/{any_filled.size}"
+                if interpolated is not None
+                else ""
+            )
         )
         cell = inspect_cell(
             flow,
@@ -429,6 +591,7 @@ def inspect_flow_gui(
             y_index=selected_y_index,
             x_index=selected_x_index,
             average=average,
+            interpolated=interpolated,
             min_valid_count=min_valid_count,
             invalid_samples=invalid_samples,
         )
@@ -450,15 +613,27 @@ def inspect_flow_gui(
         selected_y_index = nearest_index(y_values, event.ydata)
         refresh()
 
+    def step_frame(offset: int) -> None:
+        current = int(frame_slider.val)
+        next_frame = step_index(current, offset, flow.n_times - 1)
+        if next_frame != current:
+            frame_slider.set_val(next_frame)
+
     frame_slider.on_changed(lambda _value: refresh())
     valid_slider.on_changed(lambda _value: refresh())
+    previous_frame_button.on_clicked(lambda _event: step_frame(-1))
+    next_frame_button.on_clicked(lambda _event: step_frame(1))
     fig.canvas.mpl_connect("button_press_event", on_click)
 
     print(f"Reading NetCDF file: {flow.path.resolve()}")
     if average is not None:
         print(f"Reading average file: {average.path.resolve()}")
+    if interpolated is not None:
+        print(f"Reading interpolated file: {interpolated.path.resolve()}")
     else:
-        print("Raw-only inspection: no average file comparison active.")
+        print("No interpolated file comparison active.")
+    if average is None:
+        print("Raw-only average inspection: no average file comparison active.")
     print(
         f"Inspector min_valid_fraction={min_valid_fraction:g} "
         f"(initial min_count={current_min_valid_count()})."

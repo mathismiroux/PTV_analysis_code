@@ -7,14 +7,21 @@ import pytest
 from ptv_flow.inspect import (
     CellInspection,
     _apply_inspector_valid_mask,
+    _filled_image_alpha,
     _rejected_overlay_rgba,
     component_mean_ignoring_zero,
     format_cell_inspection,
     inspect_cell,
     nearest_index,
+    step_index,
     validate_average_compatible,
+    validate_interpolated_compatible,
 )
-from ptv_flow.postprocess import TemporalAverageVolume, temporal_average_volume
+from ptv_flow.postprocess import (
+    TemporalAverageVolume,
+    spatio_temporal_interpolate_velocity,
+    temporal_average_volume,
+)
 from ptv_flow.reader import FlowDataset
 
 
@@ -53,6 +60,13 @@ def test_nearest_index():
     assert nearest_index(np.array([10.0, 20.0, 30.0]), 14.0) == 0
 
 
+def test_step_index_clamps_to_available_frames():
+    assert step_index(0, -1, 9) == 0
+    assert step_index(4, -1, 9) == 3
+    assert step_index(4, 1, 9) == 5
+    assert step_index(9, 1, 9) == 9
+
+
 def test_apply_inspector_valid_mask_marks_rejected_cells_without_changing_speed():
     speed = np.array([[1.0, 2.0]])
     u = np.array([[3.0, 4.0]])
@@ -80,6 +94,11 @@ def test_apply_inspector_valid_mask_marks_rejected_cells_without_changing_speed(
     assert overlay.shape == (1, 2, 4)
     assert overlay[0, 0, 3] == 0.0
     assert overlay[0, 1, 3] > 0.0
+
+    filled_alpha = _filled_image_alpha(np.array([[True, False]]))
+    assert filled_alpha.shape == (1, 2)
+    assert filled_alpha[0, 0] < 1.0
+    assert filled_alpha[0, 1] == 1.0
 
 
 def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
@@ -129,6 +148,90 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
         assert "source: raw time series at this one cell only" in report
         assert "accepted" in report
         assert "Value stored in average file" in report
+
+
+def test_inspect_cell_reports_interpolated_values(tmp_path):
+    raw = tmp_path / "holes.nc"
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.array([0.0, 1.0, 2.0], dtype=np.float32))
+        h5.create_dataset("z", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("y", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("x", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[0.0]]], [[[3.0]]]]))
+        h5.create_dataset("v", data=np.array([[[[2.0]]], [[[0.0]]], [[[4.0]]]]))
+        h5.create_dataset("w", data=np.array([[[[3.0]]], [[[0.0]]], [[[5.0]]]]))
+
+    interpolated_path = tmp_path / "interpolated.nc"
+    with FlowDataset(raw) as flow:
+        spatio_temporal_interpolate_velocity(
+            flow,
+            interpolated_path,
+            axes=("t",),
+            min_spatial_neighbors=0,
+            zero_mask="vector",
+        )
+
+    with FlowDataset(raw) as flow, FlowDataset(interpolated_path) as interpolated:
+        validate_interpolated_compatible(flow, interpolated)
+        cell = inspect_cell(
+            flow,
+            time_index=1,
+            z_index=0,
+            y_index=0,
+            x_index=0,
+            interpolated=interpolated,
+        )
+
+    assert cell.raw_u == 0.0
+    assert cell.interpolated_u == 2.0
+    assert cell.interpolated_v == 3.0
+    assert cell.interpolated_w == 4.0
+    assert cell.filled_u
+    assert cell.filled_v
+    assert cell.filled_w
+    report = format_cell_inspection(cell)
+    assert "Value stored in interpolated file" in report
+    assert "delta=2" in report
+
+
+def test_format_interpolated_delta_marks_missing_raw_value():
+    cell = CellInspection(
+        time_index=0,
+        z_index=0,
+        y_index=0,
+        x_index=0,
+        time=0.0,
+        z=0.0,
+        y=0.0,
+        x=0.0,
+        raw_u=float("nan"),
+        raw_v=float("nan"),
+        raw_w=float("nan"),
+        raw_speed=float("nan"),
+        computed_u=component_mean_ignoring_zero(
+            np.array([float("nan")]),
+            invalid_samples="zero-or-nan",
+        ),
+        computed_v=component_mean_ignoring_zero(
+            np.array([float("nan")]),
+            invalid_samples="zero-or-nan",
+        ),
+        computed_w=component_mean_ignoring_zero(
+            np.array([float("nan")]),
+            invalid_samples="zero-or-nan",
+        ),
+        interpolated_u=1.5,
+        interpolated_v=-0.1,
+        interpolated_w=-0.7,
+        interpolated_speed=1.7,
+        filled_u=True,
+        filled_v=True,
+        filled_w=True,
+    )
+
+    report = format_cell_inspection(cell)
+    assert "delta=n/a, raw missing" in report
+    assert "u_mean=nan  count=0  rejected" in report
 
 
 def test_format_cell_inspection_marks_raw_only_mode():

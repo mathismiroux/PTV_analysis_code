@@ -6,8 +6,9 @@ from pathlib import Path
 
 import h5py
 
-from ptv_flow.cli import _invalid_samples_from_average
+from ptv_flow.cli import _invalid_samples_from_average, _invalid_samples_from_interpolated
 from ptv_flow.postprocess import TemporalAverageVolume
+from ptv_flow.reader import FlowDataset
 
 
 def test_cli_help_runs():
@@ -22,6 +23,12 @@ def test_cli_help_runs():
     assert "--inspect" in result.stdout
     assert "--average-file" in result.stdout
     assert "--compare-average" in result.stdout
+    assert "--interpolated-file" in result.stdout
+    assert "--compare-interpolated" in result.stdout
+    assert "--min-interpolation-neighbors" in result.stdout
+    assert "--interpolation-passes" in result.stdout
+    assert "--max-temporal-gap" in result.stdout
+    assert "--interpolation-workers" in result.stdout
     assert "--min-valid-fraction" in result.stdout
     assert "--invalid-samples" in result.stdout
     assert "--quantity" in result.stdout
@@ -63,6 +70,31 @@ def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_pa
     )
 
 
+def test_cli_rejects_interpolated_file_without_compare_interpolated(
+    tiny_flow_path, tmp_path
+):
+    interpolated_file = tmp_path / "interpolated.nc"
+    interpolated_file.write_bytes(b"not used")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--inspect",
+            "--interpolated-file",
+            str(interpolated_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "--interpolated-file is only used with --compare-interpolated" in (
+        result.stdout + result.stderr
+    )
+
+
 def test_cli_compare_inspect_uses_average_invalid_samples_metadata(tmp_path):
     average_file = tmp_path / "mean.nc"
     with h5py.File(average_file, "w") as h5:
@@ -77,6 +109,23 @@ def test_cli_compare_inspect_uses_average_invalid_samples_metadata(tmp_path):
     with TemporalAverageVolume(average_file) as average:
         assert _invalid_samples_from_average(average, None) == "zero-or-nan"
         assert _invalid_samples_from_average(average, "zero") == "zero"
+
+
+def test_cli_compare_inspect_uses_interpolated_invalid_samples_metadata(tmp_path):
+    interpolated_file = tmp_path / "interpolated.nc"
+    with h5py.File(interpolated_file, "w") as h5:
+        h5.attrs["invalid_samples"] = "zero-or-nan"
+        h5.create_dataset("t", data=[0.0])
+        h5.create_dataset("x", data=[0.0])
+        h5.create_dataset("y", data=[0.0])
+        h5.create_dataset("z", data=[0.0])
+        h5.create_dataset("u", data=[[[[1.0]]]])
+        h5.create_dataset("v", data=[[[[1.0]]]])
+        h5.create_dataset("w", data=[[[[1.0]]]])
+
+    with FlowDataset(interpolated_file) as interpolated:
+        assert _invalid_samples_from_interpolated(interpolated, None) == "zero-or-nan"
+        assert _invalid_samples_from_interpolated(interpolated, "zero") == "zero"
 
 
 def test_cli_summarizes_tiny_fixture(tiny_flow_path):

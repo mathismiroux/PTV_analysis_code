@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Mapping
+from typing import Mapping, Sequence
 import uuid
 
 import h5py
@@ -17,6 +18,8 @@ from ptv_flow.validity import (
 )
 
 REYNOLDS_STRESS_COMPONENTS = ("uu", "uv", "uw", "vv", "vw", "ww")
+INTERPOLATION_AXES = ("t", "z", "y", "x")
+_AXIS_TO_DIM = {"t": 0, "z": 1, "y": 2, "x": 3}
 
 
 def _prepare_output_path(output: Path, overwrite: bool) -> tuple[Path, Path]:
@@ -29,6 +32,166 @@ def _prepare_output_path(output: Path, overwrite: bool) -> tuple[Path, Path]:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary_output = output.with_name(f"{output.name}.tmp-{uuid.uuid4().hex}")
     return output, temporary_output
+
+
+def _normalize_interpolation_axes(axes: Sequence[str]) -> tuple[str, ...]:
+    normalized = tuple(axis.lower() for axis in axes)
+    invalid = [axis for axis in normalized if axis not in INTERPOLATION_AXES]
+    if invalid:
+        raise ValueError(
+            "Unknown interpolation axis/axes: "
+            f"{', '.join(invalid)}. Choose from {', '.join(INTERPOLATION_AXES)}."
+        )
+    return tuple(dict.fromkeys(normalized))
+
+
+def _interpolate_along_axis(
+    data: np.ndarray,
+    axis: int,
+    coordinates: np.ndarray,
+    eligible: np.ndarray,
+    max_index_gap: int | None = None,
+) -> np.ndarray:
+    moved = np.moveaxis(data, axis, 0)
+    moved_eligible = np.moveaxis(eligible, axis, 0)
+    flat = moved.reshape(moved.shape[0], -1)
+    flat_eligible = moved_eligible.reshape(moved_eligible.shape[0], -1)
+    valid = np.isfinite(flat)
+    candidate = flat_eligible & ~valid
+    if not np.any(candidate):
+        return data
+
+    axis_indices = np.arange(flat.shape[0])[:, None]
+    left_indices = np.where(valid, axis_indices, -1)
+    left_indices = np.maximum.accumulate(left_indices, axis=0)
+    right_indices = np.where(valid, axis_indices, flat.shape[0])
+    right_indices = np.minimum.accumulate(right_indices[::-1, :], axis=0)[::-1, :]
+    bracketed = (
+        candidate
+        & (left_indices >= 0)
+        & (right_indices < flat.shape[0])
+        & (left_indices != right_indices)
+    )
+    if max_index_gap is not None:
+        bracketed &= (axis_indices - left_indices <= max_index_gap) & (
+            right_indices - axis_indices <= max_index_gap
+        )
+    if not np.any(bracketed):
+        return data
+
+    filled = flat.copy()
+    fill_rows, fill_columns = np.nonzero(bracketed)
+    left = left_indices[fill_rows, fill_columns]
+    right = right_indices[fill_rows, fill_columns]
+    left_coordinates = coordinates[left]
+    right_coordinates = coordinates[right]
+    coordinate_span = right_coordinates - left_coordinates
+    nonzero_span = coordinate_span != 0.0
+    fill_rows = fill_rows[nonzero_span]
+    fill_columns = fill_columns[nonzero_span]
+    left = left[nonzero_span]
+    right = right[nonzero_span]
+    left_coordinates = left_coordinates[nonzero_span]
+    coordinate_span = coordinate_span[nonzero_span]
+    fractions = (coordinates[fill_rows] - left_coordinates) / coordinate_span
+    left_values = flat[left, fill_columns]
+    right_values = flat[right, fill_columns]
+    filled[fill_rows, fill_columns] = left_values + (
+        right_values - left_values
+    ) * fractions
+    return np.moveaxis(filled.reshape(moved.shape), 0, axis)
+
+
+def _spatial_corner_neighbor_count(valid: np.ndarray) -> np.ndarray:
+    counts = np.zeros(valid.shape, dtype=np.uint8)
+    for z_offset in (-1, 1):
+        source_z = slice(max(0, -z_offset), valid.shape[1] - max(0, z_offset))
+        target_z = slice(max(0, z_offset), valid.shape[1] - max(0, -z_offset))
+        for y_offset in (-1, 1):
+            source_y = slice(max(0, -y_offset), valid.shape[2] - max(0, y_offset))
+            target_y = slice(max(0, y_offset), valid.shape[2] - max(0, -y_offset))
+            for x_offset in (-1, 1):
+                source_x = slice(max(0, -x_offset), valid.shape[3] - max(0, x_offset))
+                target_x = slice(max(0, x_offset), valid.shape[3] - max(0, -x_offset))
+                counts[:, target_z, target_y, target_x] += valid[
+                    :,
+                    source_z,
+                    source_y,
+                    source_x,
+                ]
+    return counts
+
+
+def _interpolate_component_passes(
+    data: np.ndarray,
+    hole_mask: np.ndarray,
+    coordinates: Mapping[str, np.ndarray],
+    axes: Sequence[str],
+    min_spatial_neighbors: int,
+    passes: int,
+    max_temporal_gap: int | None,
+) -> np.ndarray:
+    for _pass_index in range(passes):
+        missing = hole_mask & ~np.isfinite(data)
+        if not np.any(missing):
+            break
+
+        valid = np.isfinite(data)
+        neighbor_counts = _spatial_corner_neighbor_count(valid)
+        eligible = missing & (neighbor_counts >= min_spatial_neighbors)
+        if not np.any(eligible):
+            break
+
+        filled_before = int(np.count_nonzero(hole_mask & np.isfinite(data)))
+        for axis_name in axes:
+            data = _interpolate_along_axis(
+                data,
+                axis=_AXIS_TO_DIM[axis_name],
+                coordinates=coordinates[axis_name],
+                eligible=eligible,
+                max_index_gap=max_temporal_gap if axis_name == "t" else None,
+            )
+        filled_after = int(np.count_nonzero(hole_mask & np.isfinite(data)))
+        if filled_after == filled_before:
+            break
+    return data
+
+
+def _interpolate_component_result(
+    name: str,
+    data: np.ndarray,
+    hole_mask: np.ndarray,
+    before_missing: int,
+    coordinates: Mapping[str, np.ndarray],
+    axes: Sequence[str],
+    min_spatial_neighbors: int,
+    passes: int,
+    max_temporal_gap: int | None,
+) -> tuple[str, np.ndarray, np.ndarray, int, int, int]:
+    original_data = data.copy()
+    data[hole_mask] = np.nan
+    data = _interpolate_component_passes(
+        data=data,
+        hole_mask=hole_mask,
+        coordinates=coordinates,
+        axes=axes,
+        min_spatial_neighbors=min_spatial_neighbors,
+        passes=passes,
+        max_temporal_gap=max_temporal_gap,
+    )
+
+    filled_mask = hole_mask & np.isfinite(data)
+    untouched_nonfinite = (~hole_mask) & (~np.isfinite(original_data))
+    data[untouched_nonfinite] = original_data[untouched_nonfinite]
+    remaining_mask = hole_mask & ~np.isfinite(data)
+    return (
+        name,
+        data,
+        filled_mask,
+        before_missing,
+        int(np.count_nonzero(filled_mask)),
+        int(np.count_nonzero(remaining_mask)),
+    )
 
 
 class TemporalAverageVolume:
@@ -479,6 +642,215 @@ def apply_valid_fraction_to_average(
         flush=True,
     )
     print(f"Saved filtered average to: {output.resolve()}", flush=True)
+    return output
+
+
+def spatio_temporal_interpolate_velocity(
+    flow: FlowDataset,
+    output: Path,
+    axes: Sequence[str] = INTERPOLATION_AXES,
+    min_spatial_neighbors: int = 6,
+    passes: int = 1,
+    max_temporal_gap: int | None = None,
+    workers: int = 1,
+    zero_mask: str = "component",
+    overwrite: bool = False,
+    metadata: Mapping[str, str | float] | None = None,
+    invalid_samples: str = "zero",
+) -> Path:
+    """Fill holes in raw velocity fields with sequential linear interpolation.
+
+    Interpolation is purely data-driven. Invalid samples are converted to NaN,
+    then each requested axis is filled with one-dimensional linear interpolation
+    in sequence. Original valid samples are preserved exactly.
+    """
+
+    if zero_mask not in {"component", "vector"}:
+        raise ValueError("zero_mask must be 'component' or 'vector'")
+    validate_invalid_samples(invalid_samples)
+    if not 0 <= min_spatial_neighbors <= 8:
+        raise ValueError("min_spatial_neighbors must be between 0 and 8")
+    if passes <= 0:
+        raise ValueError("passes must be positive")
+    if max_temporal_gap is not None and max_temporal_gap <= 0:
+        raise ValueError("max_temporal_gap must be positive when provided")
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+    workers = min(workers, len(VELOCITY_COMPONENTS))
+    selected_axes = _normalize_interpolation_axes(axes)
+
+    output, temporary_output = _prepare_output_path(output, overwrite)
+    coordinates = {name: flow.coordinate(name) for name in INTERPOLATION_AXES}
+    fill_counts: dict[str, int] = {}
+    remaining_counts: dict[str, int] = {}
+
+    print(f"Reading NetCDF file: {flow.path.resolve()}", flush=True)
+    print(
+        "Interpolating velocity fields, "
+        f"shape={flow.shape}, axes={','.join(selected_axes)}, "
+        f"min_spatial_neighbors={min_spatial_neighbors}/8, "
+        f"passes={passes}, "
+        f"max_temporal_gap={max_temporal_gap if max_temporal_gap is not None else 'none'}, "
+        f"workers={workers}, "
+        f"zero_mask={zero_mask}, invalid_samples={invalid_samples}",
+        flush=True,
+    )
+
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "spatio_temporal_interpolate_velocity"
+            out.attrs["method"] = "sequential_linear_interpolation"
+            out.attrs["interpolation_axes"] = np.array(
+                selected_axes,
+                dtype=h5py.string_dtype(),
+            )
+            out.attrs["min_interpolation_neighbors"] = min_spatial_neighbors
+            out.attrs["interpolation_neighbor_definition"] = "3d_corner_neighbors"
+            out.attrs["interpolation_passes"] = passes
+            out.attrs["max_temporal_gap"] = (
+                -1 if max_temporal_gap is None else max_temporal_gap
+            )
+            out.attrs["interpolation_workers"] = workers
+            out.attrs["zero_mask"] = zero_mask
+            out.attrs["invalid_samples"] = invalid_samples
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
+
+            provenance = out.create_group("provenance")
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["method"] = out.attrs["method"]
+            provenance.attrs["interpolation_axes"] = out.attrs["interpolation_axes"]
+            provenance.attrs["min_interpolation_neighbors"] = min_spatial_neighbors
+            provenance.attrs["interpolation_neighbor_definition"] = (
+                out.attrs["interpolation_neighbor_definition"]
+            )
+            provenance.attrs["interpolation_passes"] = passes
+            provenance.attrs["max_temporal_gap"] = out.attrs["max_temporal_gap"]
+            provenance.attrs["interpolation_workers"] = workers
+            provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["invalid_samples"] = invalid_samples
+
+            for name in COORDINATES:
+                out.create_dataset(name, data=flow.coordinate(name))
+
+            vector_valid = None
+            shared_hole_mask = None
+            shared_missing_count = None
+            if zero_mask == "vector":
+                chunks = {
+                    name: flow._file[name][:] for name in VELOCITY_COMPONENTS
+                }
+                vector_valid = valid_vector_samples(chunks, invalid_samples)
+                shared_hole_mask = ~vector_valid
+                shared_missing_count = int(np.count_nonzero(shared_hole_mask))
+                print(
+                    f"Shared vector hole mask: holes={shared_missing_count}",
+                    flush=True,
+                )
+            else:
+                chunks = {}
+
+            component_tasks = []
+            for name in VELOCITY_COMPONENTS:
+                data = (
+                    chunks[name].astype(np.float64, copy=True)
+                    if zero_mask == "vector"
+                    else flow._file[name][:].astype(np.float64, copy=True)
+                )
+                valid = (
+                    vector_valid
+                    if zero_mask == "vector"
+                    else valid_component_samples(data, invalid_samples)
+                )
+                hole_mask = shared_hole_mask if zero_mask == "vector" else ~valid
+                data[hole_mask] = np.nan
+                if shared_missing_count is not None:
+                    before_missing = shared_missing_count
+                else:
+                    before_missing = int(np.count_nonzero(hole_mask))
+
+                component_tasks.append(
+                    (
+                        name,
+                        data,
+                        hole_mask,
+                        before_missing,
+                        coordinates,
+                        selected_axes,
+                        min_spatial_neighbors,
+                        passes,
+                        max_temporal_gap,
+                    )
+                )
+
+            if workers == 1:
+                component_results = [
+                    _interpolate_component_result(*task)
+                    for task in component_tasks
+                ]
+            else:
+                task_columns = tuple(zip(*component_tasks))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    component_results = list(
+                        executor.map(
+                            _interpolate_component_result,
+                            *task_columns,
+                        )
+                    )
+
+            for name, data, filled_mask, before_missing, filled_count, remaining_count in (
+                component_results
+            ):
+                fill_counts[name] = int(np.count_nonzero(filled_mask))
+                remaining_counts[name] = remaining_count
+
+                out.create_dataset(
+                    name,
+                    data=data,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_filled_mask",
+                    data=filled_mask,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                print(
+                    f"Interpolated {name}: holes={before_missing}, "
+                    f"filled={filled_count}, "
+                    f"remaining={remaining_count}",
+                    flush=True,
+                )
+
+            out.attrs["u_filled_count"] = fill_counts["u"]
+            out.attrs["v_filled_count"] = fill_counts["v"]
+            out.attrs["w_filled_count"] = fill_counts["w"]
+            out.attrs["u_remaining_missing_count"] = remaining_counts["u"]
+            out.attrs["v_remaining_missing_count"] = remaining_counts["v"]
+            out.attrs["w_remaining_missing_count"] = remaining_counts["w"]
+
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(f"Saved interpolated velocity file to: {output.resolve()}", flush=True)
     return output
 
 

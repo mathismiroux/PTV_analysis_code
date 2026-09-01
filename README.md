@@ -423,6 +423,74 @@ file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings. They also store the `invalid_samples` mode used for the
 analysis.
 
+### Interpolate Velocity Holes
+
+Fill holes in a raw 4D velocity time series before computing wake products:
+
+```powershell
+python main.py "path\to\raw_file.nc" --interpolate-velocity --output outputs\interpolated_velocity.nc
+python main.py --case static_x3p5d --interpolate-velocity
+python main.py "path\to\raw_file.nc" --interpolate-velocity --invalid-samples zero-or-nan --interpolation-axes t z y x --max-temporal-gap 1 --interpolation-passes 3 --output outputs\interpolated_velocity.nc
+```
+
+This is a non-physics-informed interpolation. The code converts selected holes
+to `NaN`, then applies one-dimensional linear interpolation sequentially along
+the requested axes. Original valid samples are preserved. The default axis order
+is `t z y x`, so temporal neighbors are used first, then the spatial grid.
+By default, each filled value needs at least 6 valid cells among the 8
+surrounding 3D corner neighbors at the same time index. Under-supported holes
+remain missing.
+
+Options:
+
+- `--interpolation-axes t z y x`: choose the interpolation axes and their
+  order. Use fewer axes when you want a stricter fill, for example
+  `--interpolation-axes t`.
+- `--min-interpolation-neighbors 6`: choose how much support is required
+  around each hole. The default 6 requires 6 valid cells out of the 8
+  surrounding 3D corner neighbors.
+- `--interpolation-passes N`: repeat the selected axis sequence up to `N`
+  times. Later passes may use values filled by earlier passes when checking
+  the 3D neighbor support. The command stops early if a pass fills nothing.
+- `--max-temporal-gap N`: limit temporal interpolation to brackets at most `N`
+  frames away on each side of the missing frame. Use `--max-temporal-gap 1`
+  for strict `t-1` and `t+1` interpolation. If omitted, temporal brackets can
+  be farther away.
+- `--interpolation-workers N`: interpolate multiple velocity components at the
+  same time. Use `--interpolation-workers 3` to process `u`, `v`, and `w` in
+  parallel when RAM allows it.
+- `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which samples are
+  treated as holes.
+- `--zero-mask component`: default. Fill holes independently for `u`, `v`,
+  and `w`.
+- `--zero-mask vector`: treat a full velocity vector as missing only when all
+  selected invalid-value conditions apply to the vector. Use this when holes
+  occur at the same locations for `u`, `v`, and `w`; the interpolation reuses
+  one shared hole mask for all three components. Interpolation along each
+  selected axis is vectorized across all grid lines for speed.
+- `--output path.nc`: output file. Without `--output`, raw-file workflows write
+  to `outputs\{raw_stem}_interpolated.nc`; case workflows write an
+  `interpolated_velocity.nc` product in the case output folder.
+- `--overwrite`: allow replacing an existing interpolated file.
+
+The output file keeps the raw-style datasets `t`, `z`, `y`, `x`, `u`, `v`, and
+`w`, plus `{component}_filled_mask` datasets showing which cells were filled.
+File metadata records the source file, interpolation axes, invalid-sample
+policy, and filled/remaining hole counts.
+
+To visualize what was added, open the inspector with the raw file and the
+interpolated file together:
+
+```powershell
+python main.py "path\to\raw_file.nc" --inspect --compare-interpolated --interpolated-file outputs\interpolated_velocity.nc --z 0 --frame 0
+```
+
+The displayed velocity field comes from the interpolated file. Cells where any
+velocity component was filled are drawn semi-transparent. Click a cell to see
+raw values, interpolated values, per-component filled flags, and the velocity
+deltas. Use the `<` and `>` buttons next to the frame slider to move exactly
+one frame at a time.
+
 ### Plot Mean Wake Z-Plane Composites
 
 After `prepare_mean_wake_products.py` has created reusable `mean.nc` files, plot

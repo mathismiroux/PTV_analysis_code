@@ -320,7 +320,7 @@ def temporal_average_volume(
     overwrite: bool = False,
     u_inf: float | None = None,
     metadata: Mapping[str, str | float] | None = None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> Path:
     """Compute temporal mean velocity fields while excluding invalid samples.
 

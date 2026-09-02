@@ -4,19 +4,25 @@ import h5py
 import numpy as np
 
 from ptv_flow.postprocess import (
+    PhaseAverageVolume,
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
     extract_z_slab,
+    phase_average_volume,
     reynolds_stresses,
     spatio_temporal_interpolate_velocity,
     temporal_average_volume,
     turbulent_kinetic_energy,
 )
 from ptv_flow.reader import FlowDataset
+from ptv_flow.validity import valid_component_samples
 
 
-def _expected_component_mean(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    valid = data != 0.0
+def _expected_component_mean(
+    data: np.ndarray,
+    invalid_samples: str = "nan",
+) -> tuple[np.ndarray, np.ndarray]:
+    valid = valid_component_samples(data, invalid_samples)
     counts = valid.sum(axis=0, dtype=np.uint32)
     means = np.full(data.shape[1:], np.nan, dtype=np.float64)
     np.divide(
@@ -29,9 +35,13 @@ def _expected_component_mean(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _expected_component_prime2(
-    data: np.ndarray, mean: np.ndarray
+    data: np.ndarray,
+    mean: np.ndarray,
+    invalid_samples: str = "nan",
 ) -> tuple[np.ndarray, np.ndarray]:
-    valid = (data != 0.0) & np.isfinite(mean)[None, :, :, :]
+    valid = valid_component_samples(data, invalid_samples) & np.isfinite(
+        mean
+    )[None, :, :, :]
     counts = valid.sum(axis=0, dtype=np.uint32)
     variances = np.full(data.shape[1:], np.nan, dtype=np.float64)
     fluctuation = data - mean[None, :, :, :]
@@ -51,10 +61,11 @@ def _expected_reynolds_stress(
     mean_a: np.ndarray,
     data_b: np.ndarray,
     mean_b: np.ndarray,
+    invalid_samples: str = "nan",
 ) -> tuple[np.ndarray, np.ndarray]:
     valid = (
-        (data_a != 0.0)
-        & (data_b != 0.0)
+        valid_component_samples(data_a, invalid_samples)
+        & valid_component_samples(data_b, invalid_samples)
         & np.isfinite(mean_a)[None, :, :, :]
         & np.isfinite(mean_b)[None, :, :, :]
     )
@@ -72,6 +83,95 @@ def _expected_reynolds_stress(
     return stress, counts
 
 
+def test_phase_average_recovers_phase_bins_and_harmonic(tmp_path):
+    raw = tmp_path / "phase_known.nc"
+    phases = np.tile(
+        np.array([np.pi / 4.0, 3.0 * np.pi / 4.0, 5.0 * np.pi / 4.0, 7.0 * np.pi / 4.0]),
+        2,
+    )
+    u = (10.0 + 2.0 * np.cos(phases) - 3.0 * np.sin(phases)).reshape(8, 1, 1, 1)
+    v = (20.0 + np.cos(phases)).reshape(8, 1, 1, 1)
+    w = (30.0 - np.sin(phases)).reshape(8, 1, 1, 1)
+
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(8, dtype=np.float64) * 0.25)
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("u", data=u)
+        h5.create_dataset("v", data=v)
+        h5.create_dataset("w", data=w)
+
+    output = tmp_path / "phase_average.nc"
+    with FlowDataset(raw) as flow:
+        phase_average_volume(
+            flow,
+            output,
+            n_phase_bins=4,
+            phase_signal=phases,
+            chunk_size=3,
+            u_inf=4.0,
+        )
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["operation"] == "phase_average_volume"
+        assert out.attrs["n_phase_bins"] == 4
+        np.testing.assert_array_equal(out["phase_sample_count"][:], [2, 2, 2, 2])
+        np.testing.assert_array_equal(out["u_phase_count"][:, 0, 0, 0], [2, 2, 2, 2])
+        np.testing.assert_allclose(out["u_phase_mean"][:, 0, 0, 0], u[:, 0, 0, 0][0:4])
+        np.testing.assert_allclose(out["u_mean"][0, 0, 0], 10.0)
+        np.testing.assert_allclose(
+            out["u_coherent"][:, 0, 0, 0],
+            u[:, 0, 0, 0][0:4] - 10.0,
+        )
+        np.testing.assert_allclose(out["u_harmonic_a"][0, 0, 0], 2.0, atol=1e-12)
+        np.testing.assert_allclose(out["u_harmonic_b"][0, 0, 0], -3.0, atol=1e-12)
+        np.testing.assert_allclose(
+            out["u_harmonic_amplitude"][0, 0, 0],
+            np.sqrt(13.0),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            out["wake_deficit_phase"][:, 0, 0, 0],
+            (4.0 - out["u_phase_mean"][:, 0, 0, 0]) / 4.0,
+        )
+        np.testing.assert_allclose(
+            out["wake_deficit_coherent"][:, 0, 0, 0],
+            -out["u_coherent"][:, 0, 0, 0] / 4.0,
+        )
+
+
+def test_phase_average_from_frequency_masks_sparse_bins(tmp_path):
+    raw = tmp_path / "phase_sparse.nc"
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(4, dtype=np.float64) * 0.25)
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[0.0]]], [[[3.0]]], [[[4.0]]]]))
+        h5.create_dataset("v", data=np.ones((4, 1, 1, 1)))
+        h5.create_dataset("w", data=np.ones((4, 1, 1, 1)))
+
+    output = tmp_path / "phase_average.nc"
+    with FlowDataset(raw) as flow:
+        phase_average_volume(
+            flow,
+            output,
+            n_phase_bins=4,
+            frequency_hz=1.0,
+            min_valid_fraction=1.0,
+            chunk_size=2,
+            invalid_samples="zero",
+        )
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["phase_source"] == "frequency"
+        assert out.attrs["frequency_hz"] == 1.0
+        assert np.isnan(out["u_phase_mean"][1, 0, 0, 0])
+        assert out["u_phase_mean"][0, 0, 0, 0] == 1.0
+        assert out["u_phase_count"][1, 0, 0, 0] == 0
+
+
 def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_path):
     output = tmp_path / "mean.nc"
     with FlowDataset(tiny_flow_path) as flow:
@@ -79,7 +179,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
 
     with h5py.File(tiny_flow_path, "r") as src, h5py.File(output, "r") as out:
         assert out.attrs["zero_mask"] == "component"
-        assert out.attrs["invalid_samples"] == "zero"
+        assert out.attrs["invalid_samples"] == "nan"
         assert set(out.keys()) == {
             "abs_U",
             "provenance",
@@ -98,7 +198,7 @@ def test_temporal_average_component_mask_matches_fixture(tiny_flow_path, tmp_pat
         assert out.attrs["source_file_name"] == "tiny_flow.nc"
         assert "created_utc" in out.attrs
         assert out["provenance"].attrs["source_file"].endswith("tiny_flow.nc")
-        assert out["provenance"].attrs["invalid_samples"] == "zero"
+        assert out["provenance"].attrs["invalid_samples"] == "nan"
 
         for name in ("u", "v", "w"):
             expected_mean, expected_count = _expected_component_mean(src[name][:])
@@ -209,8 +309,20 @@ def test_temporal_average_vector_mask_differs_from_component_mask(tmp_path):
     component_output = tmp_path / "component.nc"
     vector_output = tmp_path / "vector.nc"
     with FlowDataset(raw) as flow:
-        temporal_average_volume(flow, component_output, chunk_size=1, zero_mask="component")
-        temporal_average_volume(flow, vector_output, chunk_size=1, zero_mask="vector")
+        temporal_average_volume(
+            flow,
+            component_output,
+            chunk_size=1,
+            zero_mask="component",
+            invalid_samples="zero",
+        )
+        temporal_average_volume(
+            flow,
+            vector_output,
+            chunk_size=1,
+            zero_mask="vector",
+            invalid_samples="zero",
+        )
 
     with h5py.File(component_output, "r") as component, h5py.File(vector_output, "r") as vector:
         assert component["u_mean"][0, 0, 0] == 3.0
@@ -252,6 +364,7 @@ def test_temporal_average_min_valid_fraction_discards_sparse_values(tmp_path):
             output,
             chunk_size=2,
             min_valid_fraction=0.8,
+            invalid_samples="zero",
         )
 
     with h5py.File(output, "r") as out:
@@ -325,7 +438,7 @@ def test_apply_valid_fraction_to_existing_average(tmp_path):
     average = tmp_path / "mean.nc"
     filtered = tmp_path / "mean_80.nc"
     with FlowDataset(raw) as flow:
-        temporal_average_volume(flow, average, chunk_size=2)
+        temporal_average_volume(flow, average, chunk_size=2, invalid_samples="zero")
 
     apply_valid_fraction_to_average(average, filtered, min_valid_fraction=0.8)
 
@@ -442,6 +555,7 @@ def test_spatio_temporal_interpolation_vector_mask(tmp_path):
             output=output,
             axes=("t",),
             zero_mask="vector",
+            invalid_samples="zero",
         )
 
     with h5py.File(output, "r") as out:
@@ -470,12 +584,14 @@ def test_spatio_temporal_interpolation_respects_max_spatial_gap(tmp_path):
             output=max_two,
             axes=("x",),
             max_spatial_gap=2,
+            invalid_samples="zero",
         )
         spatio_temporal_interpolate_velocity(
             flow,
             output=max_four,
             axes=("x",),
             max_spatial_gap=4,
+            invalid_samples="zero",
         )
 
     with h5py.File(max_two, "r") as two, h5py.File(max_four, "r") as four:
@@ -508,6 +624,7 @@ def test_spatio_temporal_interpolation_vector_mode_reuses_hole_mask(tmp_path):
             output=output,
             axes=("t",),
             zero_mask="vector",
+            invalid_samples="zero",
         )
 
     with h5py.File(output, "r") as out:
@@ -542,6 +659,7 @@ def test_spatio_temporal_interpolation_parallel_workers_match_serial(tmp_path):
             axes=("t",),
             zero_mask="vector",
             workers=1,
+            invalid_samples="zero",
         )
         spatio_temporal_interpolate_velocity(
             flow,
@@ -549,6 +667,7 @@ def test_spatio_temporal_interpolation_parallel_workers_match_serial(tmp_path):
             axes=("t",),
             zero_mask="vector",
             workers=3,
+            invalid_samples="zero",
         )
 
     with h5py.File(serial, "r") as one, h5py.File(parallel, "r") as many:
@@ -590,6 +709,7 @@ def test_spatio_temporal_interpolation_records_multiple_passes(tmp_path):
             axes=("t",),
             passes=2,
             overwrite=True,
+            invalid_samples="zero",
         )
 
     with h5py.File(two_passes, "r") as two:
@@ -622,12 +742,14 @@ def test_spatio_temporal_interpolation_respects_max_temporal_gap(tmp_path):
             output=max_two,
             axes=("t",),
             max_temporal_gap=2,
+            invalid_samples="zero",
         )
         spatio_temporal_interpolate_velocity(
             flow,
             output=max_three,
             axes=("t",),
             max_temporal_gap=3,
+            invalid_samples="zero",
         )
 
     with h5py.File(max_two, "r") as two, h5py.File(max_three, "r") as three:
@@ -839,4 +961,50 @@ def test_temporal_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
         assert x_plane["vertical_axis"] == "z"
         assert x_plane["vector_horizontal_name"] == "v"
         assert x_plane["vector_vertical_name"] == "w"
+        assert x_plane["speed"].shape == (3, 5)
+
+
+def test_phase_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
+    output = tmp_path / "phase_average.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        phase_average_volume(
+            flow,
+            output=output,
+            n_phase_bins=2,
+            frequency_hz=1.0,
+            chunk_size=2,
+        )
+
+    with PhaseAverageVolume(output) as volume:
+        assert volume.n_phase_bins == 2
+        z_plane = volume.read_plane(phase_index=0, axis="z", index=1)
+        assert z_plane["horizontal_axis"] == "x"
+        assert z_plane["vertical_axis"] == "y"
+        assert z_plane["vector_horizontal_name"] == "u"
+        assert z_plane["vector_vertical_name"] == "v"
+        assert z_plane["speed"].shape == (5, 6)
+        assert z_plane["u_count"].shape == (5, 6)
+
+        y_plane = volume.read_plane(phase_index=1, axis="y", index=2)
+        assert y_plane["horizontal_axis"] == "x"
+        assert y_plane["vertical_axis"] == "z"
+        assert y_plane["vector_horizontal_name"] == "u"
+        assert y_plane["vector_vertical_name"] == "w"
+        assert y_plane["speed"].shape == (3, 6)
+
+        x_plane = volume.read_plane(phase_index=0, axis="x", index=3)
+        assert x_plane["horizontal_axis"] == "y"
+        assert x_plane["vertical_axis"] == "z"
+        assert x_plane["vector_horizontal_name"] == "v"
+        assert x_plane["vector_vertical_name"] == "w"
+        assert x_plane["speed"].shape == (3, 5)
+
+        coherent_plane = volume.read_plane(
+            phase_index=0,
+            axis="z",
+            index=1,
+            field="coherent",
+        )
+        assert coherent_plane["field"] == "coherent"
+        assert coherent_plane["speed"].shape == (5, 6)
         assert x_plane["speed"].shape == (3, 5)

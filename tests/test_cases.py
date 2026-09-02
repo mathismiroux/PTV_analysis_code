@@ -75,6 +75,31 @@ def test_case_validation_rejects_missing_u_inf():
         case.validate_for_temporal_average()
 
 
+def test_case_phase_validation_requires_frequency_or_phase_signal(tmp_path):
+    registry = tmp_path / "cases.yaml"
+    velocity = (tmp_path / "tiny_flow.nc").resolve()
+    velocity.write_bytes(b"not opened")
+    registry.write_text(
+        f"""
+cases:
+  bad_phase_case:
+    label: Bad phase case
+    motion_type: surge
+    downstream_distance: 3.5D
+    frequency_hz: null
+    u_inf: 4.0
+    files:
+      velocity: "{velocity.as_posix()}"
+      phase_signal: null
+""",
+        encoding="utf-8",
+    )
+    case = load_case("bad_phase_case", registry)
+
+    with pytest.raises(ValueError, match="frequency_hz"):
+        case.validate_for_phase_average()
+
+
 def test_load_cases_rejects_missing_downstream_distance(tmp_path):
     registry = tmp_path / "cases.yaml"
     registry.write_text(

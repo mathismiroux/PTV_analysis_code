@@ -298,6 +298,7 @@ Click a cell in the slice to inspect:
 - the selected indices and coordinates
 - raw `u`, `v`, `w`, and speed at the selected frame
 - selected-voxel temporal mean computed on demand from the raw time series
+- selected-voxel phase coverage, when phase information is available
 
 The inspector does not compute a full averaged volume. It only reads the time
 series for the one clicked voxel, which is why this value appears quickly.
@@ -308,6 +309,30 @@ raw frame colors stay unchanged, rejected cells are marked with a translucent
 red overlay, and their arrows are suppressed. The side panel still reports the
 raw value at the selected frame. Passing
 `--min-valid-fraction` sets the initial slider value.
+
+To check whether phase averaging is well populated at one location, pass the
+motion frequency or use a case that already defines `frequency_hz`:
+
+```powershell
+python main.py --case surge_st06_x3p5d --inspect --z 0 --n-phase-bins 16 --min-valid-fraction 0.8
+python main.py "path\to\raw_file.nc" --inspect --frequency-hz 2.0 --n-phase-bins 16
+```
+
+The side panel then shows one row per phase bin with the number of raw samples
+in that bin, the minimum valid count required by the current valid-fraction
+slider, the finite/non-NaN `u`, `v`, and `w` counts at the clicked voxel, and
+the phase-averaged `u_bar`, `v_bar`, and `w_bar` values. This makes it visible
+when a point has acceptable temporal coverage overall but poor coverage in one
+or more phase bins.
+
+If you already computed `phase_average.nc`, inspect its stored phase-counts
+directly without reopening the raw file:
+
+```powershell
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --inspect-phase-average --x 0 --y 0 --z 0 --min-valid-fraction 0.8
+```
+
+This prints the same per-bin count table for the nearest stored grid point.
 
 If you already computed a temporal-average output file, pass it too:
 
@@ -386,7 +411,7 @@ Useful options:
 ### Compute A Temporal Average
 
 Create a 3D mean velocity volume from a raw 4D time series. By default,
-exact-zero samples are ignored in the average.
+`NaN` and infinite samples are ignored in the average.
 
 ```powershell
 python main.py "path\to\raw_file.nc" --temporal-average --output outputs\temporal_mean.nc
@@ -400,14 +425,14 @@ Options:
   the command refuses to overwrite existing results.
 - `--chunk-size N`: number of time steps read at once. Larger values can be
   faster but use more memory.
-- `--zero-mask component`: default. Ignore exact zeros independently for
-  `u`, `v`, and `w`.
-- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
-  exactly zero.
+- `--zero-mask component`: default. When zeros are treated as invalid, apply
+  the zero mask independently for `u`, `v`, and `w`.
+- `--zero-mask vector`: when zeros are treated as invalid, reject a sample only
+  when `u`, `v`, and `w` are all exactly zero.
 - `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which raw samples are
-  treated as missing. The default is `zero`, matching the current DaVis export.
-  Use `nan` when missing values are exported as `NaN`, or `zero-or-nan` during
-  a transition period where both conventions may appear.
+  treated as missing. The default is `nan`. Use `zero` for old exports where
+  missing values are exact zeros, or `zero-or-nan` during a transition period
+  where both conventions may appear.
 - `--min-valid-fraction F`: discard averaged values with fewer than this
   fraction of valid time samples. Use `--min-valid-fraction 0.8` to require
   80 percent valid data at each voxel/component.
@@ -426,6 +451,52 @@ Processed files store provenance metadata in the file attributes and in a
 file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings. They also store the `invalid_samples` mode used for the
 analysis.
+
+### Compute A Phase Average
+
+Create phase-locked velocity fields over one imposed-motion cycle:
+
+```powershell
+python main.py --case surge_st06_x3p5d --phase-average --n-phase-bins 16
+python main.py "path\to\raw_file.nc" --phase-average --frequency-hz 2.0 --output outputs\phase_average.nc
+```
+
+With `--case`, the phase is inferred from `frequency_hz` in `cases.yaml`, unless
+the case provides `files.phase_signal`. For raw-file workflows, pass either
+`--frequency-hz` or `--phase-signal`.
+
+Options:
+
+- `--n-phase-bins N`: number of equal phase bins over one cycle.
+- `--frequency-hz F`: imposed sinusoidal motion frequency.
+- `--phase-signal path`: one phase value per raw time step. Text, `.npy`, and
+  HDF5 files with `phase`, `phase_signal`, or `phi` are supported.
+- `--phase-offset R`: phase offset in radians added when phase is inferred from
+  frequency.
+- `--chunk-size`, `--zero-mask`, `--invalid-samples`, `--min-valid-fraction`,
+  `--output`, and `--overwrite`: same meaning as temporal averaging.
+
+The output file contains `phase`, `phase_degrees`, `u_phase_mean`,
+`v_phase_mean`, `w_phase_mean`, matching phase counts, temporal means,
+coherent fields such as `u_coherent = u_phase_mean - u_mean`, and
+first-harmonic products `u_harmonic_a`, `u_harmonic_b`,
+`u_harmonic_amplitude`, and `u_harmonic_phase` for each velocity component.
+When `u_inf` is available, it also stores `wake_deficit_phase` and
+`wake_deficit_coherent`.
+
+To visually inspect the resulting phase-averaged velocity, open an interactive
+plane viewer:
+
+```powershell
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --phase-average-plane --plane z --plane-value 0 --quantity speed
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --phase-average-plane --plane y --plane-value 0 --quantity u
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --phase-average-plane --plane z --plane-value 0 --quantity u --phase-field coherent
+```
+
+The phase slider and arrow buttons move through the stored phase bins. Use
+`--phase-field phase_mean` to see the phase-averaged velocity itself, or
+`--phase-field coherent` to see the phase-locked fluctuation relative to the
+mean.
 
 ### Extract A Z Slab
 
@@ -582,10 +653,11 @@ For each voxel, the plotted quantity is:
 (U_inf - u_mean) / U_inf
 ```
 
-By default, exact zeros and `NaN` values are excluded before radial averaging.
+By default, `NaN` and infinite values are excluded before radial averaging.
 Use `--invalid-samples none` only when you explicitly want to use every value
-exported by DaVis. Use `--require-all-components` when a voxel should be used
-only if `u_mean`, `v_mean`, and `w_mean` are all valid.
+exported by DaVis. Use `--invalid-samples zero-or-nan` for products where old
+exact-zero holes should also be removed. Use `--require-all-components` when a
+voxel should be used only if `u_mean`, `v_mean`, and `w_mean` are all valid.
 
 Contour lines are drawn every `0.05` wake-deficit units by default, with
 numeric labels every `0.1`. Use `--contour-step 0` to disable contours, or
@@ -617,8 +689,9 @@ The output folder must be new. The script writes the profile PNG, a manifest
 CSV, and a `*_data.csv` table with the plotted coordinate, normalized
 coordinate, wake deficit, validity flag, selected plane, and selected `x`.
 
-Exact-zero and `NaN` mean values are excluded by default through
-`--invalid-samples zero-or-nan`.
+`NaN` and infinite mean values are excluded by default. Use
+`--invalid-samples zero-or-nan` for products where old exact-zero holes should
+also be removed.
 
 ### Compute Turbulent Kinetic Energy
 
@@ -651,10 +724,10 @@ Options:
 - `--output path.nc`: output file for the TKE volume.
 - `--overwrite`: allow replacing an existing output file.
 - `--chunk-size N`: number of time steps read at once.
-- `--zero-mask component`: default. Ignore exact zeros independently for
-  `u`, `v`, and `w`.
-- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
-  exactly zero.
+- `--zero-mask component`: default. When zeros are treated as invalid, apply
+  the zero mask independently for `u`, `v`, and `w`.
+- `--zero-mask vector`: when zeros are treated as invalid, reject a sample only
+  when `u`, `v`, and `w` are all exactly zero.
 - `--invalid-samples {zero,nan,zero-or-nan,none}`: choose whether missing raw
   samples are exact zeros, `NaN`/infinite values, both, or nothing.
 
@@ -699,10 +772,10 @@ Options:
 - `--output path.nc`: output file for the Reynolds stress volume.
 - `--overwrite`: allow replacing an existing output file.
 - `--chunk-size N`: number of time steps read at once.
-- `--zero-mask component`: default. Ignore exact zeros independently for each
-  component used in a stress product.
-- `--zero-mask vector`: ignore a sample only when `u`, `v`, and `w` are all
-  exactly zero.
+- `--zero-mask component`: default. When zeros are treated as invalid, apply
+  the zero mask independently for each component used in a stress product.
+- `--zero-mask vector`: when zeros are treated as invalid, reject a sample only
+  when `u`, `v`, and `w` are all exactly zero.
 - `--invalid-samples {zero,nan,zero-or-nan,none}`: choose whether missing raw
   samples are exact zeros, `NaN`/infinite values, both, or nothing.
 

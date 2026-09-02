@@ -20,6 +20,7 @@ from ptv_flow.validity import (
 REYNOLDS_STRESS_COMPONENTS = ("uu", "uv", "uw", "vv", "vw", "ww")
 INTERPOLATION_AXES = ("t", "z", "y", "x")
 _AXIS_TO_DIM = {"t": 0, "z": 1, "y": 2, "x": 3}
+TWO_PI = 2.0 * np.pi
 
 
 def _prepare_output_path(output: Path, overwrite: bool) -> tuple[Path, Path]:
@@ -43,6 +44,88 @@ def _normalize_interpolation_axes(axes: Sequence[str]) -> tuple[str, ...]:
             f"{', '.join(invalid)}. Choose from {', '.join(INTERPOLATION_AXES)}."
         )
     return tuple(dict.fromkeys(normalized))
+
+
+def _load_phase_signal(path: str | Path) -> np.ndarray:
+    phase_path = Path(path)
+    if not phase_path.exists():
+        raise FileNotFoundError(f"Could not find phase-signal file: {phase_path}")
+
+    if phase_path.suffix.lower() == ".npy":
+        signal = np.load(phase_path)
+    else:
+        try:
+            with h5py.File(phase_path, "r") as h5:
+                for name in ("phase", "phase_signal", "phi"):
+                    if name in h5:
+                        signal = h5[name][:]
+                        break
+                else:
+                    raise KeyError(
+                        "Phase-signal HDF5 file must contain one of: "
+                        "phase, phase_signal, phi"
+                    )
+        except OSError:
+            try:
+                signal = np.loadtxt(phase_path, delimiter=",")
+            except ValueError:
+                signal = np.loadtxt(phase_path)
+
+    signal = np.asarray(signal, dtype=np.float64)
+    if signal.ndim == 2:
+        if 1 in signal.shape:
+            signal = signal.reshape(-1)
+        else:
+            signal = signal[:, -1]
+    if signal.ndim != 1:
+        raise ValueError("phase signal must be a one-dimensional numeric sequence")
+    return signal
+
+
+def _phase_from_frequency(
+    times: np.ndarray,
+    frequency_hz: float,
+    phase_offset: float,
+) -> np.ndarray:
+    if frequency_hz <= 0.0:
+        raise ValueError("frequency_hz must be positive")
+    return (TWO_PI * float(frequency_hz) * times + float(phase_offset)) % TWO_PI
+
+
+def _phase_bin_indices(phases: np.ndarray, n_phase_bins: int) -> np.ndarray:
+    if n_phase_bins <= 0:
+        raise ValueError("n_phase_bins must be positive")
+    width = TWO_PI / float(n_phase_bins)
+    return np.floor((phases % TWO_PI) / width).astype(np.int64)
+
+
+def _first_harmonic_from_phase_means(
+    coherent: np.ndarray,
+    phase_centers: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    cos_phase = np.cos(phase_centers)[:, None, None, None]
+    sin_phase = np.sin(phase_centers)[:, None, None, None]
+    valid = np.isfinite(coherent)
+    valid_count = valid.sum(axis=0)
+
+    a = np.full(coherent.shape[1:], np.nan, dtype=np.float64)
+    b = np.full(coherent.shape[1:], np.nan, dtype=np.float64)
+    enough = valid_count > 0
+    np.divide(
+        2.0 * np.where(valid, coherent * cos_phase, 0.0).sum(axis=0),
+        valid_count,
+        out=a,
+        where=enough,
+    )
+    np.divide(
+        2.0 * np.where(valid, coherent * sin_phase, 0.0).sum(axis=0),
+        valid_count,
+        out=b,
+        where=enough,
+    )
+    amplitude = np.sqrt(a * a + b * b)
+    phase = np.arctan2(-b, a)
+    return a, b, amplitude, phase
 
 
 def _interpolate_along_axis(
@@ -311,6 +394,191 @@ class TemporalAverageVolume:
         }
 
 
+class PhaseAverageVolume:
+    """Reader for phase-average output files created by this package."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        if not self.path.exists():
+            raise FileNotFoundError(f"Could not find postprocessed file: {self.path}")
+        self._file = h5py.File(self.path, "r")
+        self._validate()
+
+    def __enter__(self) -> "PhaseAverageVolume":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def _validate(self) -> None:
+        required = (
+            "x",
+            "y",
+            "z",
+            "phase",
+            "phase_sample_count",
+            "u_phase_count",
+            "v_phase_count",
+            "w_phase_count",
+        )
+        missing = [name for name in required if name not in self._file]
+        if missing:
+            raise KeyError(f"Missing expected variable(s): {', '.join(missing)}")
+
+    @property
+    def grid_shape(self) -> tuple[int, int, int]:
+        return self._file["u_phase_count"].shape[1:]
+
+    @property
+    def n_phase_bins(self) -> int:
+        return int(self._file["phase"].shape[0])
+
+    def coordinate(self, name: str) -> np.ndarray:
+        if name not in ("x", "y", "z", "phase"):
+            raise ValueError("name must be one of 'x', 'y', 'z', or 'phase'")
+        return self._file[name][:]
+
+    def nearest_index(self, axis: str, value: float) -> int:
+        values = self.coordinate(axis)
+        return int(np.nanargmin(np.abs(values - value)))
+
+    def phase_counts_at(
+        self,
+        z_index: int,
+        y_index: int,
+        x_index: int,
+    ) -> dict[str, np.ndarray]:
+        z_len, y_len, x_len = self.grid_shape
+        if not 0 <= z_index < z_len:
+            raise IndexError(f"z_index must be in [0, {z_len - 1}]")
+        if not 0 <= y_index < y_len:
+            raise IndexError(f"y_index must be in [0, {y_len - 1}]")
+        if not 0 <= x_index < x_len:
+            raise IndexError(f"x_index must be in [0, {x_len - 1}]")
+
+        return {
+            "phase": self._file["phase"][:],
+            "phase_degrees": (
+                self._file["phase_degrees"][:]
+                if "phase_degrees" in self._file
+                else np.degrees(self._file["phase"][:])
+            ),
+            "phase_sample_count": self._file["phase_sample_count"][:],
+            "u_phase_count": self._file["u_phase_count"][:, z_index, y_index, x_index],
+            "v_phase_count": self._file["v_phase_count"][:, z_index, y_index, x_index],
+            "w_phase_count": self._file["w_phase_count"][:, z_index, y_index, x_index],
+        }
+
+    def read_plane(
+        self,
+        phase_index: int,
+        axis: str,
+        index: int,
+        field: str = "phase_mean",
+    ) -> dict[str, np.ndarray | float | int | str]:
+        if axis not in ("x", "y", "z"):
+            raise ValueError("axis must be one of 'x', 'y', or 'z'")
+        if field not in ("phase_mean", "coherent"):
+            raise ValueError("field must be 'phase_mean' or 'coherent'")
+        if phase_index < 0:
+            phase_index += self.n_phase_bins
+        if not 0 <= phase_index < self.n_phase_bins:
+            raise IndexError(
+                f"phase_index must be in [0, {self.n_phase_bins - 1}]"
+            )
+
+        axis_to_dim = {"z": 0, "y": 1, "x": 2}
+        dim = axis_to_dim[axis]
+        max_index = self.grid_shape[dim] - 1
+        if index < 0:
+            index += self.grid_shape[dim]
+        if not 0 <= index <= max_index:
+            raise IndexError(f"{axis}_index must be in [0, {max_index}]")
+
+        suffix = "phase_mean" if field == "phase_mean" else "coherent"
+        values = self.coordinate(axis)
+        if axis == "z":
+            horizontal_axis = "x"
+            vertical_axis = "y"
+            vector_horizontal_name = "u"
+            vector_vertical_name = "v"
+            u = self._file[f"u_{suffix}"][phase_index, index, :, :]
+            v = self._file[f"v_{suffix}"][phase_index, index, :, :]
+            w = self._file[f"w_{suffix}"][phase_index, index, :, :]
+            u_count = self._file["u_phase_count"][phase_index, index, :, :]
+            v_count = self._file["v_phase_count"][phase_index, index, :, :]
+            w_count = self._file["w_phase_count"][phase_index, index, :, :]
+        elif axis == "y":
+            horizontal_axis = "x"
+            vertical_axis = "z"
+            vector_horizontal_name = "u"
+            vector_vertical_name = "w"
+            u = self._file[f"u_{suffix}"][phase_index, :, index, :]
+            v = self._file[f"v_{suffix}"][phase_index, :, index, :]
+            w = self._file[f"w_{suffix}"][phase_index, :, index, :]
+            u_count = self._file["u_phase_count"][phase_index, :, index, :]
+            v_count = self._file["v_phase_count"][phase_index, :, index, :]
+            w_count = self._file["w_phase_count"][phase_index, :, index, :]
+        else:
+            horizontal_axis = "y"
+            vertical_axis = "z"
+            vector_horizontal_name = "v"
+            vector_vertical_name = "w"
+            u = self._file[f"u_{suffix}"][phase_index, :, :, index]
+            v = self._file[f"v_{suffix}"][phase_index, :, :, index]
+            w = self._file[f"w_{suffix}"][phase_index, :, :, index]
+            u_count = self._file["u_phase_count"][phase_index, :, :, index]
+            v_count = self._file["v_phase_count"][phase_index, :, :, index]
+            w_count = self._file["w_phase_count"][phase_index, :, :, index]
+
+        speed_dataset = (
+            "speed_from_phase_mean" if field == "phase_mean" else "coherent_speed"
+        )
+        if speed_dataset in self._file:
+            if axis == "z":
+                speed = self._file[speed_dataset][phase_index, index, :, :]
+            elif axis == "y":
+                speed = self._file[speed_dataset][phase_index, :, index, :]
+            else:
+                speed = self._file[speed_dataset][phase_index, :, :, index]
+        else:
+            speed = np.sqrt(u * u + v * v + w * w)
+
+        return {
+            "field": field,
+            "phase_index": phase_index,
+            "phase": float(self._file["phase"][phase_index]),
+            "phase_degrees": float(
+                self._file["phase_degrees"][phase_index]
+                if "phase_degrees" in self._file
+                else np.degrees(self._file["phase"][phase_index])
+            ),
+            "axis": axis,
+            "index": index,
+            "value": float(values[index]),
+            f"{axis}_index": index,
+            f"{axis}_value": float(values[index]),
+            "horizontal_axis": horizontal_axis,
+            "vertical_axis": vertical_axis,
+            "horizontal": self.coordinate(horizontal_axis),
+            "vertical": self.coordinate(vertical_axis),
+            "vector_horizontal_name": vector_horizontal_name,
+            "vector_vertical_name": vector_vertical_name,
+            "vector_horizontal": {"u": u, "v": v, "w": w}[vector_horizontal_name],
+            "vector_vertical": {"u": u, "v": v, "w": w}[vector_vertical_name],
+            "u": u,
+            "v": v,
+            "w": w,
+            "u_count": u_count,
+            "v_count": v_count,
+            "w_count": w_count,
+            "speed": speed,
+        }
+
+
 def temporal_average_volume(
     flow: FlowDataset,
     output: Path,
@@ -521,6 +789,308 @@ def temporal_average_volume(
             temporary_output.unlink()
         raise
     print(f"Saved temporal average to: {output.resolve()}", flush=True)
+    return output
+
+
+def phase_average_volume(
+    flow: FlowDataset,
+    output: Path,
+    n_phase_bins: int = 16,
+    frequency_hz: float | None = None,
+    phase_signal: str | Path | np.ndarray | None = None,
+    phase_offset: float = 0.0,
+    chunk_size: int = 50,
+    zero_mask: str = "component",
+    min_valid_fraction: float = 0.0,
+    overwrite: bool = False,
+    u_inf: float | None = None,
+    metadata: Mapping[str, str | float] | None = None,
+    invalid_samples: str = "nan",
+) -> Path:
+    """Compute phase-averaged velocity fields and first-harmonic response.
+
+    Phase can be supplied directly with one phase value per time step, or
+    inferred from ``frequency_hz`` and the raw time coordinate.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if zero_mask not in {"component", "vector"}:
+        raise ValueError("zero_mask must be 'component' or 'vector'")
+    validate_invalid_samples(invalid_samples)
+    if n_phase_bins <= 0:
+        raise ValueError("n_phase_bins must be positive")
+    if frequency_hz is None and phase_signal is None:
+        raise ValueError("phase averaging requires frequency_hz or phase_signal")
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+    if u_inf == 0.0:
+        raise ValueError("u_inf must be non-zero")
+
+    times = flow.coordinate("t").astype(np.float64)
+    if phase_signal is None:
+        phases = _phase_from_frequency(times, float(frequency_hz), phase_offset)
+        phase_source = "frequency"
+    elif isinstance(phase_signal, (str, Path)):
+        phases = _load_phase_signal(phase_signal)
+        phase_source = str(Path(phase_signal).resolve())
+    else:
+        phases = np.asarray(phase_signal, dtype=np.float64)
+        phase_source = "array"
+    phases = np.asarray(phases, dtype=np.float64).reshape(-1)
+    if phases.shape[0] != flow.n_times:
+        raise ValueError(
+            "phase signal length must match the raw time dimension: "
+            f"{phases.shape[0]} != {flow.n_times}"
+        )
+    phases = phases % TWO_PI
+    phase_indices = _phase_bin_indices(phases, n_phase_bins)
+    phase_sample_counts = np.bincount(phase_indices, minlength=n_phase_bins).astype(
+        np.uint32
+    )
+    min_valid_counts = np.ceil(
+        min_valid_fraction * phase_sample_counts.astype(np.float64)
+    ).astype(np.uint32)
+
+    output, temporary_output = _prepare_output_path(output, overwrite)
+    phase_shape = (n_phase_bins, *flow.grid_shape)
+    sums = {
+        name: np.zeros(phase_shape, dtype=np.float64)
+        for name in VELOCITY_COMPONENTS
+    }
+    counts = {
+        name: np.zeros(phase_shape, dtype=np.uint32)
+        for name in VELOCITY_COMPONENTS
+    }
+
+    print(f"Reading NetCDF file: {flow.path.resolve()}", flush=True)
+    print(
+        f"Computing phase average over {flow.n_times} time steps, "
+        f"grid={flow.grid_shape}, n_phase_bins={n_phase_bins}, "
+        f"frequency_hz={frequency_hz if frequency_hz is not None else 'none'}, "
+        f"zero_mask={zero_mask}, invalid_samples={invalid_samples}, "
+        f"chunk_size={chunk_size}, min_valid_fraction={min_valid_fraction:g}",
+        flush=True,
+    )
+
+    start_time = perf_counter()
+    for start in range(0, flow.n_times, chunk_size):
+        stop = min(start + chunk_size, flow.n_times)
+        chunk_bins = phase_indices[start:stop]
+        if zero_mask == "vector":
+            chunks = {
+                name: flow._file[name][start:stop, :, :, :]
+                for name in VELOCITY_COMPONENTS
+            }
+            valid = valid_vector_samples(chunks, invalid_samples)
+            for phase_bin in np.unique(chunk_bins):
+                selected = chunk_bins == phase_bin
+                selected_valid = valid[selected, :, :, :]
+                for name, data in chunks.items():
+                    selected_data = data[selected, :, :, :]
+                    sums[name][phase_bin] += np.where(
+                        selected_valid, selected_data, 0.0
+                    ).sum(axis=0, dtype=np.float64)
+                    counts[name][phase_bin] += selected_valid.sum(
+                        axis=0, dtype=np.uint32
+                    )
+        else:
+            for phase_bin in np.unique(chunk_bins):
+                selected = chunk_bins == phase_bin
+                for name in VELOCITY_COMPONENTS:
+                    data = flow._file[name][start:stop, :, :, :][selected, :, :, :]
+                    valid = valid_component_samples(data, invalid_samples)
+                    sums[name][phase_bin] += np.where(valid, data, 0.0).sum(
+                        axis=0, dtype=np.float64
+                    )
+                    counts[name][phase_bin] += valid.sum(axis=0, dtype=np.uint32)
+
+        elapsed = perf_counter() - start_time
+        print(
+            f"Processed time steps {start:4d}-{stop - 1:4d} / "
+            f"{flow.n_times - 1} ({elapsed:.1f} s)",
+            flush=True,
+        )
+
+    phase_means = {}
+    temporal_means = {}
+    coherent = {}
+    harmonic = {}
+    for name in VELOCITY_COMPONENTS:
+        phase_means[name] = np.full(phase_shape, np.nan, dtype=np.float64)
+        enough_data = counts[name] > 0
+        for phase_bin in range(n_phase_bins):
+            enough_data[phase_bin] &= counts[name][phase_bin] >= min_valid_counts[
+                phase_bin
+            ]
+        np.divide(
+            sums[name],
+            counts[name],
+            out=phase_means[name],
+            where=enough_data,
+        )
+
+        total_sum = sums[name].sum(axis=0, dtype=np.float64)
+        total_count = counts[name].sum(axis=0, dtype=np.uint32)
+        temporal_means[name] = np.full(flow.grid_shape, np.nan, dtype=np.float64)
+        np.divide(
+            total_sum,
+            total_count,
+            out=temporal_means[name],
+            where=total_count > 0,
+        )
+        coherent[name] = phase_means[name] - temporal_means[name][None, :, :, :]
+        harmonic[name] = _first_harmonic_from_phase_means(
+            coherent[name], (np.arange(n_phase_bins) + 0.5) * TWO_PI / n_phase_bins
+        )
+
+    speed_from_phase_mean = np.sqrt(
+        phase_means["u"] * phase_means["u"]
+        + phase_means["v"] * phase_means["v"]
+        + phase_means["w"] * phase_means["w"]
+    )
+    coherent_speed = np.sqrt(
+        coherent["u"] * coherent["u"]
+        + coherent["v"] * coherent["v"]
+        + coherent["w"] * coherent["w"]
+    )
+    wake_deficit_phase = None
+    wake_deficit_coherent = None
+    if u_inf is not None:
+        wake_deficit_phase = (float(u_inf) - phase_means["u"]) / float(u_inf)
+        wake_deficit_coherent = -coherent["u"] / float(u_inf)
+
+    phase_centers = (np.arange(n_phase_bins, dtype=np.float64) + 0.5) * (
+        TWO_PI / n_phase_bins
+    )
+    phase_edges = np.arange(n_phase_bins + 1, dtype=np.float64) * (
+        TWO_PI / n_phase_bins
+    )
+
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "phase_average_volume"
+            out.attrs["phase_source"] = phase_source
+            out.attrs["frequency_hz"] = -1.0 if frequency_hz is None else float(frequency_hz)
+            out.attrs["phase_offset"] = float(phase_offset)
+            out.attrs["n_phase_bins"] = n_phase_bins
+            out.attrs["zero_mask"] = zero_mask
+            out.attrs["invalid_samples"] = invalid_samples
+            out.attrs["chunk_size"] = chunk_size
+            out.attrs["min_valid_fraction"] = min_valid_fraction
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
+            if u_inf is not None:
+                out.attrs["u_inf"] = float(u_inf)
+
+            provenance = out.create_group("provenance")
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["phase_source"] = phase_source
+            provenance.attrs["frequency_hz"] = out.attrs["frequency_hz"]
+            provenance.attrs["phase_offset"] = out.attrs["phase_offset"]
+            provenance.attrs["n_phase_bins"] = n_phase_bins
+            provenance.attrs["zero_mask"] = zero_mask
+            provenance.attrs["invalid_samples"] = invalid_samples
+            provenance.attrs["chunk_size"] = chunk_size
+            provenance.attrs["min_valid_fraction"] = min_valid_fraction
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
+            if u_inf is not None:
+                provenance.attrs["u_inf"] = float(u_inf)
+
+            for name in COORDINATES:
+                if name == "t":
+                    continue
+                out.create_dataset(name, data=flow.coordinate(name))
+            out.create_dataset("phase", data=phase_centers)
+            out.create_dataset("phase_degrees", data=np.degrees(phase_centers))
+            out.create_dataset("phase_edges", data=phase_edges)
+            out.create_dataset("phase_edges_degrees", data=np.degrees(phase_edges))
+            out.create_dataset("phase_sample_count", data=phase_sample_counts)
+            out.create_dataset("phase_min_valid_count", data=min_valid_counts)
+
+            for name in VELOCITY_COMPONENTS:
+                out.create_dataset(
+                    f"{name}_phase_mean",
+                    data=phase_means[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_phase_count",
+                    data=counts[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_mean",
+                    data=temporal_means[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    f"{name}_coherent",
+                    data=coherent[name],
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                a, b, amplitude, phase = harmonic[name]
+                for suffix, values in (
+                    ("harmonic_a", a),
+                    ("harmonic_b", b),
+                    ("harmonic_amplitude", amplitude),
+                    ("harmonic_phase", phase),
+                ):
+                    out.create_dataset(
+                        f"{name}_{suffix}",
+                        data=values,
+                        compression="gzip",
+                        compression_opts=4,
+                    )
+            out.create_dataset(
+                "speed_from_phase_mean",
+                data=speed_from_phase_mean,
+                compression="gzip",
+                compression_opts=4,
+            )
+            out.create_dataset(
+                "coherent_speed",
+                data=coherent_speed,
+                compression="gzip",
+                compression_opts=4,
+            )
+            if wake_deficit_phase is not None and wake_deficit_coherent is not None:
+                out.create_dataset(
+                    "wake_deficit_phase",
+                    data=wake_deficit_phase,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                out.create_dataset(
+                    "wake_deficit_coherent",
+                    data=wake_deficit_coherent,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(f"Saved phase average to: {output.resolve()}", flush=True)
     return output
 
 
@@ -763,7 +1333,7 @@ def spatio_temporal_interpolate_velocity(
     zero_mask: str = "component",
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> Path:
     """Fill holes in raw velocity fields with sequential linear interpolation.
 
@@ -1005,7 +1575,7 @@ def turbulent_kinetic_energy(
     zero_mask: str = "component",
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> Path:
     """Compute turbulent kinetic energy from raw velocities and mean velocities.
 
@@ -1189,7 +1759,7 @@ def reynolds_stresses(
     zero_mask: str = "component",
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> Path:
     """Compute selected Reynolds stress components from raw and mean velocities.
 

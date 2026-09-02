@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 
 from ptv_flow.cli import _invalid_samples_from_average, _invalid_samples_from_interpolated
-from ptv_flow.postprocess import TemporalAverageVolume
+from ptv_flow.postprocess import TemporalAverageVolume, phase_average_volume
 from ptv_flow.reader import FlowDataset
 
 
@@ -21,7 +21,11 @@ def test_cli_help_runs():
     )
     assert "--temporal-average" in result.stdout
     assert "--average-plane" in result.stdout
+    assert "--phase-average-plane" in result.stdout
     assert "--inspect" in result.stdout
+    assert "--inspect-phase-average" in result.stdout
+    assert "--x" in result.stdout
+    assert "--y" in result.stdout
     assert "--average-file" in result.stdout
     assert "--compare-average" in result.stdout
     assert "--interpolated-file" in result.stdout
@@ -36,6 +40,7 @@ def test_cli_help_runs():
     assert "--min-valid-fraction" in result.stdout
     assert "--invalid-samples" in result.stdout
     assert "--quantity" in result.stdout
+    assert "--phase-field" in result.stdout
     assert "--plane" in result.stdout
     assert "--plane-value" in result.stdout
     assert "--overwrite" in result.stdout
@@ -49,6 +54,10 @@ def test_cli_help_runs():
     assert "--processing-id" in result.stdout
     assert "--postprocess-basic" in result.stdout
     assert "--cases" in result.stdout
+    assert "--phase-average" in result.stdout
+    assert "--n-phase-bins" in result.stdout
+    assert "--frequency-hz" in result.stdout
+    assert "--phase-signal" in result.stdout
 
 
 def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_path):
@@ -72,6 +81,33 @@ def test_cli_rejects_average_file_without_compare_average(tiny_flow_path, tmp_pa
     assert "--average-file is only used with --compare-average" in (
         result.stdout + result.stderr
     )
+
+
+def test_cli_explains_postprocessed_file_used_as_raw_path(tmp_path):
+    mean_file = tmp_path / "mean.nc"
+    with h5py.File(mean_file, "w") as h5:
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("u_mean", data=np.zeros((1, 1, 1)))
+        h5.create_dataset("v_mean", data=np.zeros((1, 1, 1)))
+        h5.create_dataset("w_mean", data=np.zeros((1, 1, 1)))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(mean_file),
+            "--inspect",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    message = result.stdout + result.stderr
+    assert "Expected a raw velocity time-series file" in message
+    assert "--compare-average --average-file" in message
 
 
 def test_cli_rejects_interpolated_file_without_compare_interpolated(
@@ -315,6 +351,105 @@ def test_cli_case_tke_and_reynolds_use_case_mean_file(tmp_path):
         assert out.attrs["case_id"] == "tiny_static_x3p5d"
         assert out.attrs["processing_id"] == "tiny_static_x3p5d"
         assert "uv_reynolds_stress" in out
+
+
+def test_cli_case_phase_average_uses_case_frequency(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    velocity = repo_root / "tests" / "data" / "tiny_flow.nc"
+    registry = tmp_path / "cases.yaml"
+    registry.write_text(
+        f"""
+cases:
+  tiny_surge_x3p5d:
+    label: Tiny surge
+    motion_type: surge
+    downstream_distance: 3.5D
+    frequency_hz: 1.0
+    u_inf: 4.0
+    rotor_diameter: 1.2
+    rotor_frequency_hz: 8.0
+    blade_passing_frequency_hz: 24.0
+    files:
+      velocity: "{velocity.as_posix()}"
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            "--case",
+            "tiny_surge_x3p5d",
+            "--cases-file",
+            str(registry),
+            "--phase-average",
+            "--n-phase-bins",
+            "4",
+            "--chunk-size",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    output = tmp_path / "outputs" / "tiny_surge_x3p5d" / "phase_average.nc"
+    assert output.exists()
+    with h5py.File(output, "r") as out:
+        assert out.attrs["operation"] == "phase_average_volume"
+        assert out.attrs["case_id"] == "tiny_surge_x3p5d"
+        assert out.attrs["processing_id"] == "tiny_surge_x3p5d"
+        assert out.attrs["frequency_hz"] == 1.0
+        assert out.attrs["n_phase_bins"] == 4
+        assert "u_coherent" in out
+        assert "u_harmonic_amplitude" in out
+        assert "wake_deficit_phase" in out
+
+
+def test_cli_inspect_phase_average_reads_final_file(tmp_path):
+    repo_root = Path(__file__).parents[1]
+    raw = tmp_path / "phase_source.nc"
+    phases = np.array([0.1, 0.2, np.pi + 0.1, np.pi + 0.2])
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(4, dtype=np.float64))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[2.0]]], [[[0.0]]], [[[4.0]]]]))
+        h5.create_dataset("v", data=np.ones((4, 1, 1, 1)))
+        h5.create_dataset("w", data=np.ones((4, 1, 1, 1)))
+
+    output = tmp_path / "phase_average.nc"
+    with FlowDataset(raw) as flow:
+        phase_average_volume(
+            flow,
+            output,
+            n_phase_bins=2,
+            phase_signal=phases,
+            chunk_size=2,
+            invalid_samples="zero",
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "main.py"),
+            str(output),
+            "--inspect-phase-average",
+            "--min-valid-fraction",
+            "0.8",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert "Phase-average file inspection" in result.stdout
+    assert "Selected-voxel phase coverage" in result.stdout
+    assert "no" in result.stdout
 
 
 def test_cli_case_tke_requires_processing_id_for_ambiguous_mean_files(tmp_path):

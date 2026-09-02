@@ -14,6 +14,9 @@ def test_valid_component_samples_modes():
     data = np.array([0.0, 1.0, np.nan, np.inf])
 
     np.testing.assert_array_equal(
+        valid_component_samples(data), [True, True, False, False]
+    )
+    np.testing.assert_array_equal(
         valid_component_samples(data, "zero"), [False, True, True, True]
     )
     np.testing.assert_array_equal(
@@ -34,6 +37,10 @@ def test_valid_vector_samples_keeps_any_valid_component():
         "w": np.array([0.0, 0.0, 0.0, np.nan, 3.0]),
     }
 
+    np.testing.assert_array_equal(
+        valid_vector_samples(components),
+        [True, True, True, False, False],
+    )
     np.testing.assert_array_equal(
         valid_vector_samples(components, "zero"),
         [False, True, True, True, True],

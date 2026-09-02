@@ -135,6 +135,15 @@ class FlowCase:
         self.require_velocity()
         self.require_u_inf()
 
+    def validate_for_phase_average(self) -> None:
+        self.require_velocity()
+        self.require_u_inf()
+        if self.frequency_hz is None and self.files.phase_signal is None:
+            raise ValueError(
+                f"Case {self.case_id!r} must define frequency_hz or "
+                "files.phase_signal for phase averaging."
+            )
+
 
 def _next_available_output_dir(base_output_dir: Path, product_name: str) -> Path:
     candidate = base_output_dir

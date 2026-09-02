@@ -13,13 +13,18 @@ from ptv_flow.inspect import (
     component_mean_ignoring_zero,
     format_cell_inspection,
     inspect_cell,
+    inspect_phase_average_counts,
     nearest_index,
+    phase_coverage_for_cell,
+    phase_values_for_flow,
     step_index,
     validate_average_compatible,
     validate_interpolated_compatible,
 )
 from ptv_flow.postprocess import (
+    PhaseAverageVolume,
     TemporalAverageVolume,
+    phase_average_volume,
     spatio_temporal_interpolate_velocity,
     temporal_average_volume,
 )
@@ -27,18 +32,26 @@ from ptv_flow.reader import FlowDataset
 
 
 def test_component_mean_ignores_exact_zeros():
-    mean = component_mean_ignoring_zero(np.array([0.0, 2.0, 4.0, 0.0]))
+    mean = component_mean_ignoring_zero(
+        np.array([0.0, 2.0, 4.0, 0.0]),
+        invalid_samples="zero",
+    )
     assert mean.mean == 3.0
     assert mean.count == 2
     assert mean.accepted
 
-    empty = component_mean_ignoring_zero(np.array([0.0, 0.0]))
+    empty = component_mean_ignoring_zero(
+        np.array([0.0, 0.0]),
+        invalid_samples="zero",
+    )
     assert np.isnan(empty.mean)
     assert empty.count == 0
     assert not empty.accepted
 
     rejected = component_mean_ignoring_zero(
-        np.array([0.0, 2.0, 4.0, 0.0]), min_valid_count=3
+        np.array([0.0, 2.0, 4.0, 0.0]),
+        min_valid_count=3,
+        invalid_samples="zero",
     )
     assert np.isnan(rejected.mean)
     assert rejected.count == 2
@@ -117,6 +130,100 @@ def test_coverage_from_counts_reports_undercovered_volume():
     assert coverage.rejected_fraction == pytest.approx(0.75)
 
 
+def test_phase_coverage_for_cell_reports_bin_counts(tmp_path):
+    raw = tmp_path / "phase_coverage.nc"
+    phases = np.array([0.1, 0.2, np.pi + 0.1, np.pi + 0.2])
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(4, dtype=np.float64))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[2.0]]], [[[np.nan]]], [[[4.0]]]]))
+        h5.create_dataset("v", data=np.array([[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[4.0]]]]))
+        h5.create_dataset("w", data=np.array([[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[np.nan]]]]))
+
+    with FlowDataset(raw) as flow:
+        coverage = phase_coverage_for_cell(
+            flow,
+            z_index=0,
+            y_index=0,
+            x_index=0,
+            phases=phases,
+            n_phase_bins=2,
+            min_valid_fraction=0.8,
+        )
+        cell = inspect_cell(
+            flow,
+            time_index=0,
+            z_index=0,
+            y_index=0,
+            x_index=0,
+            phases=phases,
+            n_phase_bins=2,
+            min_valid_fraction=0.8,
+        )
+
+    np.testing.assert_array_equal(coverage.sample_counts, [2, 2])
+    np.testing.assert_array_equal(coverage.min_valid_counts, [2, 2])
+    np.testing.assert_array_equal(coverage.u_counts, [2, 1])
+    np.testing.assert_array_equal(coverage.v_counts, [2, 2])
+    np.testing.assert_array_equal(coverage.w_counts, [2, 1])
+    np.testing.assert_allclose(coverage.u_means, [1.5, 4.0])
+    assert cell.phase_coverage is not None
+    report = format_cell_inspection(cell)
+    assert "Selected-voxel phase coverage" in report
+    assert "selected indices: z=0, y=0, x=0" in report
+    assert "phase  n  min  u  v  w  ok      u_bar" in report
+    assert "1.5" in report
+    assert "no" in report
+
+
+def test_phase_values_for_flow_from_frequency(tiny_flow_path):
+    with FlowDataset(tiny_flow_path) as flow:
+        phases = phase_values_for_flow(flow, frequency_hz=1.0, phase_offset=0.25)
+
+        expected = (2.0 * np.pi * flow.coordinate("t") + 0.25) % (2.0 * np.pi)
+        np.testing.assert_allclose(phases, expected)
+
+
+def test_inspect_phase_average_counts_reads_final_product(tmp_path):
+    raw = tmp_path / "phase_final_source.nc"
+    phases = np.array([0.1, 0.2, np.pi + 0.1, np.pi + 0.2])
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.arange(4, dtype=np.float64))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("y", data=np.array([0.0]))
+        h5.create_dataset("x", data=np.array([0.0]))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[2.0]]], [[[np.nan]]], [[[4.0]]]]))
+        h5.create_dataset("v", data=np.ones((4, 1, 1, 1)))
+        h5.create_dataset("w", data=np.ones((4, 1, 1, 1)))
+
+    phase_average = tmp_path / "phase_average.nc"
+    with FlowDataset(raw) as flow:
+        phase_average_volume(
+            flow,
+            phase_average,
+            n_phase_bins=2,
+            phase_signal=phases,
+            chunk_size=2,
+        )
+
+    with PhaseAverageVolume(phase_average) as volume:
+        report = inspect_phase_average_counts(
+            volume,
+            x_value=0.0,
+            y_value=0.0,
+            z_value=0.0,
+            min_valid_fraction=0.8,
+        )
+
+    assert "Phase-average file inspection" in report
+    assert "Selected-voxel phase coverage" in report
+    assert "selected indices: z=0, y=0, x=0" in report
+    assert "phase  n  min  u  v  w  ok      u_bar" in report
+    assert "no" in report
+
+
 def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
     average_path = tmp_path / "mean.nc"
     with FlowDataset(tiny_flow_path) as flow:
@@ -127,7 +234,7 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
         TemporalAverageVolume(average_path) as average,
         h5py.File(tiny_flow_path, "r") as raw,
     ):
-        valid_counts = (raw["u"][:] != 0.0).sum(axis=0)
+        valid_counts = np.isfinite(raw["u"][:]).sum(axis=0)
         z_index, y_index, x_index = np.argwhere(valid_counts > 0)[0]
         cell = inspect_cell(
             flow,
@@ -143,7 +250,7 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
         assert cell.raw_w == pytest.approx(raw["w"][1, z_index, y_index, x_index])
 
         u_series = raw["u"][:, z_index, y_index, x_index]
-        u_valid = u_series != 0.0
+        u_valid = np.isfinite(u_series)
         assert cell.computed_u.mean == pytest.approx(u_series[u_valid].mean())
         assert cell.computed_u.count == int(u_valid.sum())
         assert cell.average_u is not None
@@ -203,6 +310,7 @@ def test_inspect_cell_reports_interpolated_values(tmp_path):
             interpolated_path,
             axes=("t",),
             zero_mask="vector",
+            invalid_samples="zero",
         )
 
     with FlowDataset(raw) as flow, FlowDataset(interpolated_path) as interpolated:

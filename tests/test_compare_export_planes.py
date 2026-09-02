@@ -18,7 +18,7 @@ def test_temporal_plane_stats_matches_source_component_slice(tiny_flow_path):
         spec = plane_spec(flow, "y", float(flow.coordinate("y")[2]))
         stats = temporal_plane_stats(flow, "u", spec)
         data = src["u"][:, :, spec.index, :].astype(np.float64)
-        valid = data != 0.0
+        valid = np.isfinite(data)
         count = valid.sum(axis=0)
         expected_mean = np.full(data.shape[1:], np.nan)
         np.divide(
@@ -101,7 +101,7 @@ def test_format_run_configuration_reports_defaults(tiny_flow_path, tmp_path):
         output=tmp_path / "comparison.png",
         x_planes=None,
         y_plane=None,
-        invalid_samples="zero",
+        invalid_samples="nan",
         difference=False,
         reference_grid="first",
         provided={
@@ -117,7 +117,7 @@ def test_format_run_configuration_reports_defaults(tiny_flow_path, tmp_path):
     )
 
     assert "quantity (default)" in report
-    assert "invalid_samples (default): zero" in report
+    assert "invalid_samples (default): nan" in report
     assert "x_planes (default from common overlap)" in report
     assert "y_plane (default from common overlap)" in report
     assert "resolved nearest planes" in report

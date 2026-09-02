@@ -4,9 +4,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Button, Slider
 import numpy as np
 
-from ptv_flow.postprocess import TemporalAverageVolume
+from ptv_flow.postprocess import PhaseAverageVolume, TemporalAverageVolume
 from ptv_flow.reader import FlowDataset
 
 
@@ -69,6 +70,23 @@ def _temporal_average_quantity(
         return plane["v"], "Mean v velocity", "coolwarm"
     if quantity == "w":
         return plane["w"], "Mean w velocity", "coolwarm"
+    raise ValueError("quantity must be one of 'speed', 'u', 'v', or 'w'")
+
+
+def _phase_average_quantity(
+    plane: dict[str, np.ndarray | float | int | str],
+    quantity: str,
+) -> tuple[np.ndarray, str, str]:
+    field = str(plane.get("field", "phase_mean"))
+    prefix = "Phase-mean" if field == "phase_mean" else "Coherent"
+    if quantity == "speed":
+        return plane["speed"], f"{prefix} 3D velocity magnitude", "viridis"
+    if quantity == "u":
+        return plane["u"], f"{prefix} u velocity", "coolwarm"
+    if quantity == "v":
+        return plane["v"], f"{prefix} v velocity", "coolwarm"
+    if quantity == "w":
+        return plane["w"], f"{prefix} w velocity", "coolwarm"
     raise ValueError("quantity must be one of 'speed', 'u', 'v', or 'w'")
 
 
@@ -261,6 +279,158 @@ def show_temporal_average_plane(
         print(f"Saved plane visualization to {save}")
     else:
         plt.show()
+
+
+def _phase_plane_min_valid_counts(
+    volume: PhaseAverageVolume,
+    min_valid_fraction: float,
+) -> np.ndarray:
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+    counts = volume._file["phase_sample_count"][:].astype(np.float64)
+    return np.maximum(np.ceil(min_valid_fraction * counts), 1).astype(np.uint32)
+
+
+def _apply_phase_plane_valid_fraction(
+    plane: dict[str, np.ndarray | float | int | str],
+    scalar: np.ndarray,
+    quantity: str,
+    min_valid_count: int,
+) -> np.ndarray:
+    if min_valid_count <= 1:
+        return scalar.copy()
+    if quantity in {"u", "v", "w"}:
+        count = plane[f"{quantity}_count"]
+        return np.where(count >= min_valid_count, scalar, np.nan)
+    accepted = (
+        (plane["u_count"] >= min_valid_count)
+        & (plane["v_count"] >= min_valid_count)
+        & (plane["w_count"] >= min_valid_count)
+    )
+    return np.where(accepted, scalar, np.nan)
+
+
+def show_phase_average_plane_gui(
+    volume: PhaseAverageVolume,
+    plane_axis: str = "z",
+    plane_value: float = 0.0,
+    quantity: str = "speed",
+    field: str = "phase_mean",
+    quiver_step: int = 3,
+    min_valid_fraction: float = 0.0,
+) -> None:
+    """Interactively show phase-averaged planes, one phase bin at a time."""
+
+    plane_index = volume.nearest_index(plane_axis, plane_value)
+    phase_index = 0
+    min_valid_counts = _phase_plane_min_valid_counts(volume, min_valid_fraction)
+    first = volume.read_plane(
+        phase_index=phase_index,
+        axis=plane_axis,
+        index=plane_index,
+        field=field,
+    )
+    scalar, colorbar_label, cmap = _phase_average_quantity(first, quantity)
+    scalar = _apply_phase_plane_valid_fraction(
+        first,
+        scalar,
+        quantity=quantity,
+        min_valid_count=int(min_valid_counts[phase_index]),
+    )
+
+    fig = plt.figure(figsize=(11, 8), constrained_layout=False)
+    ax = fig.add_axes((0.08, 0.20, 0.78, 0.72))
+    prev_ax = fig.add_axes((0.17, 0.105, 0.06, 0.04))
+    slider_ax = fig.add_axes((0.26, 0.112, 0.43, 0.03))
+    next_ax = fig.add_axes((0.72, 0.105, 0.06, 0.04))
+
+    image, quiver, q_slice = _draw_xy_vector_plane(
+        ax=ax,
+        horizontal=first["horizontal"],
+        vertical=first["vertical"],
+        scalar=scalar,
+        vector_horizontal=first["vector_horizontal"],
+        vector_vertical=first["vector_vertical"],
+        quiver_step=quiver_step,
+        cmap=cmap,
+        horizontal_label=first["horizontal_axis"],
+        vertical_label=first["vertical_axis"],
+    )
+    cbar = fig.colorbar(image, ax=ax)
+    cbar.set_label(colorbar_label)
+    title = ax.set_title("")
+    phase_slider = Slider(
+        slider_ax,
+        "Phase bin",
+        0,
+        volume.n_phase_bins - 1,
+        valinit=phase_index,
+        valstep=1,
+    )
+    previous_button = Button(prev_ax, "<")
+    next_button = Button(next_ax, ">")
+
+    def set_symmetric_clim(values: np.ndarray) -> None:
+        if quantity not in {"u", "v", "w"}:
+            return
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            limit = float(np.nanmax(np.abs(finite)))
+            if limit > 0.0:
+                image.set_clim(-limit, limit)
+
+    set_symmetric_clim(scalar)
+
+    def refresh() -> None:
+        current_phase = int(phase_slider.val)
+        plane = volume.read_plane(
+            phase_index=current_phase,
+            axis=plane_axis,
+            index=plane_index,
+            field=field,
+        )
+        scalar_data, _, _ = _phase_average_quantity(plane, quantity)
+        display_scalar = _apply_phase_plane_valid_fraction(
+            plane,
+            scalar_data,
+            quantity=quantity,
+            min_valid_count=int(min_valid_counts[current_phase]),
+        )
+        image.set_data(display_scalar)
+        quiver.set_UVC(
+            plane["vector_horizontal"][q_slice],
+            plane["vector_vertical"][q_slice],
+        )
+        set_symmetric_clim(display_scalar)
+        title.set_text(
+            f"{field} {quantity}, phase={plane['phase_degrees']:.1f} deg "
+            f"(bin {current_phase}/{volume.n_phase_bins - 1}), "
+            f"{plane_axis}={plane['value']:.6g}, "
+            f"min_count={int(min_valid_counts[current_phase])}"
+        )
+        fig.canvas.draw_idle()
+
+    def step_phase(offset: int) -> None:
+        current = int(phase_slider.val)
+        next_phase = int(np.clip(current + offset, 0, volume.n_phase_bins - 1))
+        if next_phase != current:
+            phase_slider.set_val(next_phase)
+
+    phase_slider.on_changed(lambda _value: refresh())
+    previous_button.on_clicked(lambda _event: step_phase(-1))
+    next_button.on_clicked(lambda _event: step_phase(1))
+
+    print(f"Reading phase-average file: {volume.path.resolve()}")
+    print(
+        f"Showing field={field}, quantity={quantity}, "
+        f"{plane_axis}={first['value']:.6g} "
+        f"({plane_axis}_index={first['index']}, nearest to requested "
+        f"{plane_axis}={plane_value:g}), n_phase_bins={volume.n_phase_bins}."
+    )
+    if min_valid_fraction > 0.0:
+        print(f"Display mask: min_valid_fraction={min_valid_fraction:g}.")
+    refresh()
+    plt.show()
 
 
 def show_temporal_average_z_plane(

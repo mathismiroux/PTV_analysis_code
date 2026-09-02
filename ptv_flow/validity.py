@@ -14,7 +14,7 @@ def validate_invalid_samples(invalid_samples: str) -> None:
         )
 
 
-def valid_component_samples(data: np.ndarray, invalid_samples: str = "zero") -> np.ndarray:
+def valid_component_samples(data: np.ndarray, invalid_samples: str = "nan") -> np.ndarray:
     validate_invalid_samples(invalid_samples)
     if invalid_samples == "zero":
         return data != 0.0
@@ -27,7 +27,7 @@ def valid_component_samples(data: np.ndarray, invalid_samples: str = "zero") -> 
 
 def valid_vector_samples(
     components: dict[str, np.ndarray],
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> np.ndarray:
     validate_invalid_samples(invalid_samples)
     values = list(components.values())

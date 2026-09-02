@@ -91,7 +91,7 @@ def test_plot_radial_wake_deficit_writes_plot_and_manifest(tmp_path):
     manifest = output / "Static_radial_wake_deficit.csv"
     assert manifest.exists()
     text = manifest.read_text(encoding="utf-8")
-    assert "zero-or-nan" in text
+    assert "nan" in text
     assert "contour_step" in text
     assert "contour_label_step" in text
     assert "Static_1D__b64" in text

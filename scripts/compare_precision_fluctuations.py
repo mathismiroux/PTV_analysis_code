@@ -71,7 +71,7 @@ def _read_component_cube(
     return np.asarray(data[:, :, :, :], dtype=np.float64)
 
 
-def _component_stats(data: np.ndarray, invalid_samples: str = "zero") -> ComponentStats:
+def _component_stats(data: np.ndarray, invalid_samples: str = "nan") -> ComponentStats:
     valid = valid_component_samples(data, invalid_samples)
     count = valid.sum(axis=0, dtype=np.uint32)
     mean = np.full(data.shape[1:], np.nan, dtype=np.float64)
@@ -124,7 +124,7 @@ def compare_precision(
     z_center: float,
     half_width: float,
     x_center: float | None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> str:
     lines: list[str] = []
     with FlowDataset(double_path) as double, FlowDataset(single_path) as single:
@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--invalid-samples",
         choices=INVALID_SAMPLE_MODES,
-        default="zero",
+        default="nan",
         help=(
             "raw samples to exclude from statistics: zero ignores exact zeros, "
             "nan ignores NaN/inf values, zero-or-nan ignores both, none excludes nothing"

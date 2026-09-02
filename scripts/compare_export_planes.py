@@ -130,7 +130,7 @@ def temporal_plane_stats(
     flow: FlowDataset,
     quantity: str,
     spec: PlaneSpec,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
 ) -> PlaneStats:
     data = _quantity_plane(flow, quantity, spec)
     valid = valid_component_samples(data, invalid_samples)
@@ -434,7 +434,7 @@ def compare_exports(
     output: Path,
     x_planes: tuple[float, float] | None,
     y_plane: float | None,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
     difference: bool = False,
     reference_grid: str = "first",
 ) -> Path:
@@ -586,7 +586,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--invalid-samples",
         choices=INVALID_SAMPLE_MODES,
-        default="zero",
+        default="nan",
         help=(
             "raw samples to exclude from statistics: zero ignores exact zeros, "
             "nan ignores NaN/inf values, zero-or-nan ignores both, none excludes nothing"

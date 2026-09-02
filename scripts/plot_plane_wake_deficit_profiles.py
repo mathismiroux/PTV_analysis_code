@@ -349,7 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--invalid-samples",
         choices=INVALID_SAMPLE_MODES,
-        default="zero-or-nan",
+        default="nan",
         help="mean velocity samples excluded before plotting",
     )
     parser.add_argument(

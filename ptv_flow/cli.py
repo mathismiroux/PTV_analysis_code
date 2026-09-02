@@ -5,19 +5,25 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from ptv_flow.cases import DEFAULT_CASES_FILE, FlowCase, load_case
-from ptv_flow.inspect import inspect_flow_gui
+from ptv_flow.inspect import inspect_flow_gui, inspect_phase_average_counts
 from ptv_flow.postprocess import (
+    PhaseAverageVolume,
     REYNOLDS_STRESS_COMPONENTS,
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
     extract_z_slab,
+    phase_average_volume,
     reynolds_stresses,
     spatio_temporal_interpolate_velocity,
     temporal_average_volume,
     turbulent_kinetic_energy,
 )
 from ptv_flow.reader import DEFAULT_FILE, FlowDataset
-from ptv_flow.visualize import animate_z_plane, show_temporal_average_plane
+from ptv_flow.visualize import (
+    animate_z_plane,
+    show_phase_average_plane_gui,
+    show_temporal_average_plane,
+)
 from ptv_flow.validity import INVALID_SAMPLE_MODES
 
 
@@ -91,6 +97,36 @@ def _compute_case_tke(
             metadata=metadata,
             invalid_samples=invalid_samples,
         )
+
+
+def _compute_case_phase_average(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    output: Path,
+    n_phase_bins: int,
+    phase_offset: float,
+    chunk_size: int,
+    zero_mask: str,
+    min_valid_fraction: float,
+    overwrite: bool,
+    invalid_samples: str,
+) -> Path:
+    metadata = _case_metadata(flow_case, output.parent.name)
+    return phase_average_volume(
+        flow,
+        output=output,
+        n_phase_bins=n_phase_bins,
+        frequency_hz=flow_case.frequency_hz,
+        phase_signal=flow_case.files.phase_signal,
+        phase_offset=phase_offset,
+        chunk_size=chunk_size,
+        zero_mask=zero_mask,
+        min_valid_fraction=min_valid_fraction,
+        overwrite=overwrite,
+        u_inf=flow_case.u_inf,
+        metadata=metadata,
+        invalid_samples=invalid_samples,
+    )
 
 
 def _compute_case_interpolated_velocity(
@@ -224,6 +260,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="open an interactive cell inspector for raw values and averages",
     )
     parser.add_argument(
+        "--inspect-phase-average",
+        action="store_true",
+        help="print per-phase coverage at one location from a phase_average.nc file",
+    )
+    parser.add_argument(
+        "--phase-average-plane",
+        action="store_true",
+        help="interactively view one plane from a phase_average.nc file",
+    )
+    parser.add_argument(
+        "--x",
+        type=float,
+        default=0.0,
+        help="x coordinate used by --inspect-phase-average",
+    )
+    parser.add_argument(
+        "--y",
+        type=float,
+        default=0.0,
+        help="y coordinate used by --inspect-phase-average",
+    )
+    parser.add_argument(
         "--z",
         type=float,
         default=0.0,
@@ -284,6 +342,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--temporal-average",
         action="store_true",
         help="compute a temporal average volume, excluding configured invalid samples",
+    )
+    parser.add_argument(
+        "--phase-average",
+        action="store_true",
+        help=(
+            "compute phase-averaged and first-harmonic velocity fields from "
+            "frequency metadata or a phase-signal file"
+        ),
     )
     parser.add_argument(
         "--interpolate-velocity",
@@ -400,6 +466,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="scalar quantity to plot for --average-plane",
     )
     parser.add_argument(
+        "--phase-field",
+        choices=("phase_mean", "coherent"),
+        default="phase_mean",
+        help="field to display with --phase-average-plane",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -452,8 +524,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("component", "vector"),
         default="component",
         help=(
-            "component ignores zeros independently for u/v/w; vector ignores "
-            "only samples where u, v, and w are all exactly zero"
+            "for zero-based invalid-sample modes, component treats zeros "
+            "independently for u/v/w; vector treats only all-zero vectors as invalid"
         ),
     )
     parser.add_argument(
@@ -462,8 +534,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "raw samples to exclude from statistics: zero ignores exact zeros "
-            "(default unless --inspect --compare-average can read a different "
-            "policy from --average-file), nan ignores NaN/inf values, "
+            "nan ignores NaN/inf values (default unless --inspect "
+            "--compare-average can read a different policy from --average-file), "
             "zero-or-nan ignores both, none excludes nothing"
         ),
     )
@@ -476,6 +548,36 @@ def build_parser() -> argparse.ArgumentParser:
             "time samples; use 0.8 for an 80 percent cutoff"
         ),
     )
+    parser.add_argument(
+        "--n-phase-bins",
+        type=int,
+        default=16,
+        help="number of bins over one motion cycle for --phase-average",
+    )
+    parser.add_argument(
+        "--frequency-hz",
+        type=float,
+        default=None,
+        help=(
+            "imposed motion frequency for --phase-average when not using "
+            "--case metadata"
+        ),
+    )
+    parser.add_argument(
+        "--phase-signal",
+        type=Path,
+        default=None,
+        help=(
+            "optional one-value-per-frame phase signal for --phase-average; "
+            "text, .npy, or HDF5 with phase/phase_signal/phi"
+        ),
+    )
+    parser.add_argument(
+        "--phase-offset",
+        type=float,
+        default=0.0,
+        help="phase offset in radians added when deriving phase from frequency",
+    )
     return parser
 
 
@@ -487,15 +589,15 @@ def _invalid_samples_from_average(
         return explicit_invalid_samples
     stored = average._file.attrs.get("invalid_samples")
     if stored is None:
-        return "zero"
+        return "nan"
     stored_text = stored.decode() if isinstance(stored, bytes) else str(stored)
     if stored_text not in INVALID_SAMPLE_MODES:
         print(
             f"Average file records unsupported invalid_samples={stored_text!r}; "
-            "falling back to 'zero'.",
+            "falling back to 'nan'.",
             flush=True,
         )
-        return "zero"
+        return "nan"
     print(
         f"Using invalid_samples={stored_text!r} from average file metadata.",
         flush=True,
@@ -511,15 +613,15 @@ def _invalid_samples_from_interpolated(
         return explicit_invalid_samples
     stored = interpolated._file.attrs.get("invalid_samples")
     if stored is None:
-        return "zero"
+        return "nan"
     stored_text = stored.decode() if isinstance(stored, bytes) else str(stored)
     if stored_text not in INVALID_SAMPLE_MODES:
         print(
             f"Interpolated file records unsupported invalid_samples={stored_text!r}; "
-            "falling back to 'zero'.",
+            "falling back to 'nan'.",
             flush=True,
         )
-        return "zero"
+        return "nan"
     print(
         f"Using invalid_samples={stored_text!r} from interpolated file metadata.",
         flush=True,
@@ -527,9 +629,22 @@ def _invalid_samples_from_interpolated(
     return stored_text
 
 
+def _open_flow_or_exit(path: Path, role: str = "raw velocity file") -> FlowDataset:
+    try:
+        return FlowDataset(path)
+    except KeyError as exc:
+        raise SystemExit(
+            f"Could not open {role}: {path}\n"
+            "Expected a raw velocity time-series file containing datasets "
+            "'t', 'z', 'y', 'x', 'u', 'v', and 'w'. If you are using the "
+            "inspector with a postprocessed mean file, pass the raw file first "
+            "and the mean file with --compare-average --average-file."
+        ) from exc
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    invalid_samples = args.invalid_samples or "zero"
+    invalid_samples = args.invalid_samples or "nan"
     if args.case is not None and args.cases is not None:
         raise SystemExit("Use either --case or --cases, not both.")
 
@@ -548,7 +663,7 @@ def main() -> None:
             flow_case = load_case(case_id, args.cases_file)
             flow_case.validate_for_temporal_average()
             raw_path = flow_case.require_velocity()
-            with FlowDataset(raw_path) as flow:
+            with _open_flow_or_exit(raw_path) as flow:
                 mean_output = _case_mean_output(
                     flow_case,
                     overwrite=args.overwrite,
@@ -601,6 +716,8 @@ def main() -> None:
         flow_case = load_case(args.case, args.cases_file)
         if args.temporal_average:
             flow_case.validate_for_temporal_average()
+        if args.phase_average:
+            flow_case.validate_for_phase_average()
         if args.interpolate_velocity:
             flow_case.validate_for_temporal_average()
         raw_path = flow_case.require_velocity()
@@ -635,7 +752,43 @@ def main() -> None:
             )
         return
 
-    with FlowDataset(raw_path) as flow:
+    if args.inspect_phase_average:
+        with PhaseAverageVolume(args.path) as volume:
+            print(
+                inspect_phase_average_counts(
+                    volume,
+                    x_value=args.x,
+                    y_value=args.y,
+                    z_value=args.z,
+                    min_valid_fraction=args.min_valid_fraction,
+                )
+            )
+        return
+
+    if args.phase_average_plane:
+        plane_value = args.z if args.plane_value is None and args.plane == "z" else args.plane_value
+        if plane_value is None:
+            plane_value = 0.0
+        with PhaseAverageVolume(args.path) as volume:
+            show_phase_average_plane_gui(
+                volume,
+                plane_axis=args.plane,
+                plane_value=plane_value,
+                quantity=args.quantity,
+                field=args.phase_field,
+                quiver_step=args.quiver_step,
+                min_valid_fraction=args.min_valid_fraction,
+            )
+        return
+
+    with _open_flow_or_exit(raw_path) as flow:
+        inspect_phase_frequency_hz = args.frequency_hz
+        inspect_phase_signal = args.phase_signal
+        if flow_case is not None:
+            if inspect_phase_frequency_hz is None:
+                inspect_phase_frequency_hz = flow_case.frequency_hz
+            if inspect_phase_signal is None:
+                inspect_phase_signal = flow_case.files.phase_signal
         if args.extract_z_slab:
             output = args.output
             if output is None:
@@ -668,6 +821,52 @@ def main() -> None:
                         z_width=args.z_slab_width,
                         chunk_size=args.chunk_size,
                         overwrite=args.overwrite,
+                    )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
+        elif args.phase_average:
+            output = args.output
+            if output is None:
+                if flow_case is not None:
+                    output = flow_case.default_output_path(
+                        "phase_average.nc",
+                        unique=not args.overwrite,
+                    )
+                else:
+                    output = Path("outputs") / f"{raw_path.stem}_phase_average.nc"
+            try:
+                if flow_case is not None:
+                    _compute_case_phase_average(
+                        flow_case=flow_case,
+                        flow=flow,
+                        output=output,
+                        n_phase_bins=args.n_phase_bins,
+                        phase_offset=args.phase_offset,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        min_valid_fraction=args.min_valid_fraction,
+                        overwrite=args.overwrite,
+                        invalid_samples=invalid_samples,
+                    )
+                else:
+                    phase_signal = args.phase_signal
+                    if args.frequency_hz is None and phase_signal is None:
+                        raise SystemExit(
+                            "--phase-average requires --frequency-hz or "
+                            "--phase-signal when not using --case."
+                        )
+                    phase_average_volume(
+                        flow,
+                        output=output,
+                        n_phase_bins=args.n_phase_bins,
+                        frequency_hz=args.frequency_hz,
+                        phase_signal=phase_signal,
+                        phase_offset=args.phase_offset,
+                        chunk_size=args.chunk_size,
+                        zero_mask=args.zero_mask,
+                        min_valid_fraction=args.min_valid_fraction,
+                        overwrite=args.overwrite,
+                        invalid_samples=invalid_samples,
                     )
             except FileExistsError as exc:
                 raise SystemExit(str(exc)) from exc
@@ -860,6 +1059,14 @@ def main() -> None:
                     quiver_step=args.quiver_step,
                     min_valid_fraction=args.min_valid_fraction,
                     invalid_samples=invalid_samples,
+                    phase_frequency_hz=inspect_phase_frequency_hz,
+                    phase_signal=(
+                        str(inspect_phase_signal)
+                        if inspect_phase_signal is not None
+                        else None
+                    ),
+                    phase_offset=args.phase_offset,
+                    n_phase_bins=args.n_phase_bins,
                 )
             else:
                 average_context = (
@@ -868,7 +1075,7 @@ def main() -> None:
                     else nullcontext(None)
                 )
                 interpolated_context = (
-                    FlowDataset(args.interpolated_file)
+                    _open_flow_or_exit(args.interpolated_file, "interpolated file")
                     if args.compare_interpolated
                     else nullcontext(None)
                 )
@@ -893,6 +1100,14 @@ def main() -> None:
                         quiver_step=args.quiver_step,
                         min_valid_fraction=args.min_valid_fraction,
                         invalid_samples=inspect_invalid_samples,
+                        phase_frequency_hz=inspect_phase_frequency_hz,
+                        phase_signal=(
+                            str(inspect_phase_signal)
+                            if inspect_phase_signal is not None
+                            else None
+                        ),
+                        phase_offset=args.phase_offset,
+                        n_phase_bins=args.n_phase_bins,
                     )
         else:
             print(flow.describe())

@@ -319,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--invalid-samples",
         choices=INVALID_SAMPLE_MODES,
-        default="zero",
+        default="nan",
         help="raw samples to exclude from statistics",
     )
     parser.add_argument(

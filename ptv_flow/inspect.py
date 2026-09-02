@@ -6,10 +6,12 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, Slider
 import numpy as np
 
-from ptv_flow.postprocess import TemporalAverageVolume
+from ptv_flow.postprocess import PhaseAverageVolume, TemporalAverageVolume
 from ptv_flow.reader import FlowDataset
 from ptv_flow.validity import valid_component_samples
 from ptv_flow.visualize import _draw_xy_vector_plane
+
+TWO_PI = 2.0 * np.pi
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class CellInspection:
     filled_u: bool | None = None
     filled_v: bool | None = None
     filled_w: bool | None = None
+    phase_coverage: "PhaseCoverage | None" = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,26 @@ class CoverageStats:
         return self.rejected / self.total
 
 
+@dataclass(frozen=True)
+class PhaseCoverage:
+    phase_degrees: np.ndarray
+    sample_counts: np.ndarray
+    min_valid_counts: np.ndarray
+    u_counts: np.ndarray
+    v_counts: np.ndarray
+    w_counts: np.ndarray
+    u_means: np.ndarray | None = None
+    v_means: np.ndarray | None = None
+    w_means: np.ndarray | None = None
+    z_index: int | None = None
+    y_index: int | None = None
+    x_index: int | None = None
+
+    @property
+    def n_phase_bins(self) -> int:
+        return int(self.phase_degrees.size)
+
+
 def nearest_index(values: np.ndarray, value: float) -> int:
     return int(np.nanargmin(np.abs(values - value)))
 
@@ -70,7 +93,7 @@ def step_index(current: int, offset: int, upper: int) -> int:
 
 
 def component_mean_ignoring_zero(
-    series: np.ndarray, min_valid_count: int = 1, invalid_samples: str = "zero"
+    series: np.ndarray, min_valid_count: int = 1, invalid_samples: str = "nan"
 ) -> ComponentMean:
     valid = valid_component_samples(series, invalid_samples)
     count = int(valid.sum())
@@ -80,7 +103,7 @@ def component_mean_ignoring_zero(
 
 
 def _valid_counts_for_z_plane(
-    flow: FlowDataset, z_index: int, invalid_samples: str = "zero"
+    flow: FlowDataset, z_index: int, invalid_samples: str = "nan"
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (
         valid_component_samples(
@@ -143,6 +166,111 @@ def _coverage_from_counts(
     )
 
 
+def _load_phase_signal(path: str) -> np.ndarray:
+    try:
+        return np.loadtxt(path, delimiter=",")
+    except ValueError:
+        return np.loadtxt(path)
+
+
+def phase_values_for_flow(
+    flow: FlowDataset,
+    frequency_hz: float | None = None,
+    phase_signal: str | None = None,
+    phase_offset: float = 0.0,
+) -> np.ndarray | None:
+    if phase_signal is not None:
+        phases = _load_phase_signal(phase_signal)
+    elif frequency_hz is not None:
+        if frequency_hz <= 0.0:
+            raise ValueError("frequency_hz must be positive")
+        phases = TWO_PI * float(frequency_hz) * flow.coordinate("t") + phase_offset
+    else:
+        return None
+
+    phases = np.asarray(phases, dtype=np.float64)
+    if phases.ndim == 2:
+        if 1 in phases.shape:
+            phases = phases.reshape(-1)
+        else:
+            phases = phases[:, -1]
+    phases = phases.reshape(-1)
+    if phases.size != flow.n_times:
+        raise ValueError(
+            "phase signal length must match the raw time dimension: "
+            f"{phases.size} != {flow.n_times}"
+        )
+    return phases % TWO_PI
+
+
+def phase_coverage_for_cell(
+    flow: FlowDataset,
+    z_index: int,
+    y_index: int,
+    x_index: int,
+    phases: np.ndarray,
+    n_phase_bins: int,
+    min_valid_fraction: float = 0.0,
+) -> PhaseCoverage:
+    """Return finite-sample phase coverage at one spatial cell.
+
+    The coverage table intentionally counts non-NaN/non-infinite values at the
+    selected voxel. It is not affected by zero-masking options used elsewhere.
+    """
+
+    if n_phase_bins <= 0:
+        raise ValueError("n_phase_bins must be positive")
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+    phases = np.asarray(phases, dtype=np.float64).reshape(-1)
+    if phases.size != flow.n_times:
+        raise ValueError(
+            "phase signal length must match the raw time dimension: "
+            f"{phases.size} != {flow.n_times}"
+        )
+
+    phase_width = TWO_PI / float(n_phase_bins)
+    phase_indices = np.floor((phases % TWO_PI) / phase_width).astype(np.int64)
+    sample_counts = np.bincount(phase_indices, minlength=n_phase_bins).astype(np.uint32)
+    min_valid_counts = np.ceil(
+        min_valid_fraction * sample_counts.astype(np.float64)
+    ).astype(np.uint32)
+    component_counts = []
+    component_means = []
+    for name in ("u", "v", "w"):
+        series = flow._file[name][:, z_index, y_index, x_index]
+        valid = np.isfinite(series)
+        bin_counts = np.bincount(
+            phase_indices,
+            weights=valid.astype(np.uint8),
+            minlength=n_phase_bins,
+        ).astype(np.uint32)
+        bin_sums = np.bincount(
+            phase_indices,
+            weights=np.where(valid, series, 0.0),
+            minlength=n_phase_bins,
+        ).astype(np.float64)
+        bin_means = np.full(n_phase_bins, np.nan, dtype=np.float64)
+        np.divide(bin_sums, bin_counts, out=bin_means, where=bin_counts > 0)
+        component_counts.append(bin_counts)
+        component_means.append(bin_means)
+    phase_degrees = np.degrees((np.arange(n_phase_bins) + 0.5) * phase_width)
+    return PhaseCoverage(
+        phase_degrees=phase_degrees,
+        sample_counts=sample_counts,
+        min_valid_counts=min_valid_counts,
+        u_counts=component_counts[0],
+        v_counts=component_counts[1],
+        w_counts=component_counts[2],
+        u_means=component_means[0],
+        v_means=component_means[1],
+        w_means=component_means[2],
+        z_index=z_index,
+        y_index=y_index,
+        x_index=x_index,
+    )
+
+
 def _average_count_volumes(
     average: TemporalAverageVolume,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -161,6 +289,120 @@ def _format_coverage(prefix: str, coverage: CoverageStats) -> str:
         f"  {prefix}: empty={coverage.rejected}/{coverage.total} "
         f"({percentage:.1f}%), accepted={coverage.accepted}"
     )
+
+
+def _format_phase_coverage(coverage: PhaseCoverage) -> list[str]:
+    has_means = (
+        coverage.u_means is not None
+        and coverage.v_means is not None
+        and coverage.w_means is not None
+    )
+    lines = [
+        "",
+        "Selected-voxel phase coverage",
+        f"  bins: {coverage.n_phase_bins}",
+        "  source: all frames at the selected x/y/z cell",
+    ]
+    if (
+        coverage.z_index is not None
+        and coverage.y_index is not None
+        and coverage.x_index is not None
+    ):
+        lines.append(
+            f"  selected indices: z={coverage.z_index}, "
+            f"y={coverage.y_index}, x={coverage.x_index}"
+        )
+    lines.append(
+        (
+            "  phase  n  min  u  v  w  ok      u_bar      v_bar      w_bar"
+            if has_means
+            else "  phase  n  min  u  v  w  ok"
+        )
+    )
+    for index, (phase, samples, minimum, u_count, v_count, w_count) in enumerate(
+        zip(
+            coverage.phase_degrees,
+            coverage.sample_counts,
+            coverage.min_valid_counts,
+            coverage.u_counts,
+            coverage.v_counts,
+            coverage.w_counts,
+        )
+    ):
+        ok = u_count >= minimum and v_count >= minimum and w_count >= minimum
+        line = (
+            f"  {phase:5.1f} {samples:2d} {minimum:4d} "
+            f"{u_count:2d} {v_count:2d} {w_count:2d}  {'yes' if ok else 'no'}"
+        )
+        if has_means:
+            line += (
+                f"  {coverage.u_means[index]:9.4g}"
+                f"  {coverage.v_means[index]:9.4g}"
+                f"  {coverage.w_means[index]:9.4g}"
+            )
+        lines.append(line)
+    return lines
+
+
+def inspect_phase_average_counts(
+    volume: PhaseAverageVolume,
+    x_value: float,
+    y_value: float,
+    z_value: float,
+    min_valid_fraction: float = 0.0,
+) -> str:
+    if not 0.0 <= min_valid_fraction <= 1.0:
+        raise ValueError("min_valid_fraction must be between 0 and 1")
+
+    x_index = volume.nearest_index("x", x_value)
+    y_index = volume.nearest_index("y", y_value)
+    z_index = volume.nearest_index("z", z_value)
+    counts = volume.phase_counts_at(z_index, y_index, x_index)
+    sample_counts = counts["phase_sample_count"].astype(np.uint32)
+    min_valid_counts = np.maximum(
+        np.ceil(min_valid_fraction * sample_counts.astype(np.float64)).astype(np.uint32),
+        1,
+    )
+    coverage = PhaseCoverage(
+        phase_degrees=counts["phase_degrees"],
+        sample_counts=sample_counts,
+        min_valid_counts=min_valid_counts,
+        u_counts=counts["u_phase_count"].astype(np.uint32),
+        v_counts=counts["v_phase_count"].astype(np.uint32),
+        w_counts=counts["w_phase_count"].astype(np.uint32),
+        u_means=(
+            volume._file["u_phase_mean"][:, z_index, y_index, x_index]
+            if "u_phase_mean" in volume._file
+            else None
+        ),
+        v_means=(
+            volume._file["v_phase_mean"][:, z_index, y_index, x_index]
+            if "v_phase_mean" in volume._file
+            else None
+        ),
+        w_means=(
+            volume._file["w_phase_mean"][:, z_index, y_index, x_index]
+            if "w_phase_mean" in volume._file
+            else None
+        ),
+        z_index=z_index,
+        y_index=y_index,
+        x_index=x_index,
+    )
+
+    lines = [
+        "Phase-average file inspection",
+        f"  source: {volume.path}",
+        f"  min valid fraction: {min_valid_fraction:g}",
+        "",
+        "Selected cell",
+        f"  indices: z={z_index}, y={y_index}, x={x_index}",
+        f"  coords:  z={volume.coordinate('z')[z_index]:.6g}, "
+        f"y={volume.coordinate('y')[y_index]:.6g}, "
+        f"x={volume.coordinate('x')[x_index]:.6g}",
+    ]
+    lines.extend(_format_phase_coverage(coverage))
+    return "\n".join(lines)
 
 
 def _filled_image_alpha(filled: np.ndarray, filled_alpha: float = 0.45) -> np.ndarray:
@@ -250,7 +492,10 @@ def inspect_cell(
     average: TemporalAverageVolume | None = None,
     interpolated: FlowDataset | None = None,
     min_valid_count: int = 1,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
+    phases: np.ndarray | None = None,
+    n_phase_bins: int = 16,
+    min_valid_fraction: float = 0.0,
 ) -> CellInspection:
     if time_index < 0:
         time_index += flow.n_times
@@ -359,6 +604,18 @@ def inspect_cell(
             ),
         )
 
+    phase_coverage = None
+    if phases is not None:
+        phase_coverage = phase_coverage_for_cell(
+            flow,
+            z_index=z_index,
+            y_index=y_index,
+            x_index=x_index,
+            phases=phases,
+            n_phase_bins=n_phase_bins,
+            min_valid_fraction=min_valid_fraction,
+        )
+
     return CellInspection(
         time_index=time_index,
         z_index=z_index,
@@ -397,6 +654,7 @@ def inspect_cell(
         filled_u=filled_u,
         filled_v=filled_v,
         filled_w=filled_w,
+        phase_coverage=phase_coverage,
     )
 
 
@@ -469,6 +727,16 @@ def format_cell_inspection(
                 "  not active",
             ]
         )
+    if cell.phase_coverage is not None:
+        lines.extend(_format_phase_coverage(cell.phase_coverage))
+    else:
+        lines.extend(
+            [
+                "",
+                "Phase coverage",
+                "  not active",
+            ]
+        )
     if (
         cell.interpolated_u is not None
         and cell.interpolated_v is not None
@@ -511,7 +779,11 @@ def inspect_flow_gui(
     initial_z: float = 0.0,
     quiver_step: int = 3,
     min_valid_fraction: float = 0.0,
-    invalid_samples: str = "zero",
+    invalid_samples: str = "nan",
+    phase_frequency_hz: float | None = None,
+    phase_signal: str | None = None,
+    phase_offset: float = 0.0,
+    n_phase_bins: int = 16,
 ) -> None:
     """Interactive visual inspection of raw values and temporal means."""
 
@@ -608,6 +880,12 @@ def inspect_flow_gui(
     counts_for_fixed_z = _valid_counts_for_z_plane(
         flow, z_index, invalid_samples=invalid_samples
     )
+    phases = phase_values_for_flow(
+        flow,
+        frequency_hz=phase_frequency_hz,
+        phase_signal=phase_signal,
+        phase_offset=phase_offset,
+    )
     average_count_volumes = (
         _average_count_volumes(average) if average is not None else None
     )
@@ -653,6 +931,7 @@ def inspect_flow_gui(
             f"{'Interpolated' if interpolated is not None else 'Raw'} frame={frame_index}, "
             f"t={plane.time:.6g}, "
             f"z={plane.z_value:.6g} (z_index={z_index}), "
+            f"selected y/x={selected_y_index}/{selected_x_index}, "
             f"shown accepted={int(accepted.sum())}/{accepted.size}"
             + (
                 f", avg empty volume={100.0 * volume_coverage.rejected_fraction:.1f}%"
@@ -675,6 +954,9 @@ def inspect_flow_gui(
             interpolated=interpolated,
             min_valid_count=min_valid_count,
             invalid_samples=invalid_samples,
+            phases=phases,
+            n_phase_bins=n_phase_bins,
+            min_valid_fraction=float(valid_slider.val),
         )
         info.set_text(
             format_cell_inspection(
@@ -690,10 +972,26 @@ def inspect_flow_gui(
 
     def on_click(event) -> None:
         nonlocal selected_y_index, selected_x_index
-        if event.inaxes is not ax or event.xdata is None or event.ydata is None:
+        if event.inaxes is not ax and not ax.bbox.contains(event.x, event.y):
             return
-        selected_x_index = nearest_index(x_values, event.xdata)
-        selected_y_index = nearest_index(y_values, event.ydata)
+        if event.xdata is None or event.ydata is None:
+            x_data, y_data = ax.transData.inverted().transform((event.x, event.y))
+        else:
+            x_data, y_data = event.xdata, event.ydata
+        if not (
+            np.nanmin(x_values) <= x_data <= np.nanmax(x_values)
+            and np.nanmin(y_values) <= y_data <= np.nanmax(y_values)
+        ):
+            return
+        next_x_index = nearest_index(x_values, x_data)
+        next_y_index = nearest_index(y_values, y_data)
+        if (
+            next_x_index == selected_x_index
+            and next_y_index == selected_y_index
+        ):
+            return
+        selected_x_index = next_x_index
+        selected_y_index = next_y_index
         refresh()
 
     def step_frame(offset: int) -> None:
@@ -721,6 +1019,11 @@ def inspect_flow_gui(
         f"Inspector min_valid_fraction={min_valid_fraction:g} "
         f"(initial min_count={current_min_valid_count()})."
     )
-    print("Click a cell to inspect raw values and on-demand selected-voxel means.")
+    if phases is not None:
+        print(
+            f"Phase coverage active with n_phase_bins={n_phase_bins}.",
+            flush=True,
+        )
+    print("Click a cell to inspect raw values and selected-voxel means.")
     refresh()
     plt.show()

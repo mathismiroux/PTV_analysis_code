@@ -317,7 +317,11 @@ python main.py "path\to\raw_file.nc" --inspect --z 0 --frame 0 --compare-average
 
 With `--compare-average --average-file`, the side panel also shows the stored
 `u_mean`, `v_mean`, `w_mean`, and counts from the postprocessed file so you can
-compare them with the value computed from the raw series.
+compare them with the value computed from the raw series. It also reports the
+proportion of the full averaged volume, plus the currently shown `z` plane,
+that is empty/under-covered at the current minimum valid fraction. A voxel is
+counted as empty when any velocity component has fewer valid samples than the
+current threshold.
 
 The comparison file must have the same grid shape and `x`, `y`, `z`
 coordinates as the raw file. This prevents accidentally comparing, for example,

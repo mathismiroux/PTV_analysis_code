@@ -7,6 +7,7 @@ import pytest
 from ptv_flow.inspect import (
     CellInspection,
     _apply_inspector_valid_mask,
+    _coverage_from_counts,
     _filled_image_alpha,
     _rejected_overlay_rgba,
     component_mean_ignoring_zero,
@@ -101,6 +102,21 @@ def test_apply_inspector_valid_mask_marks_rejected_cells_without_changing_speed(
     assert filled_alpha[0, 1] == 1.0
 
 
+def test_coverage_from_counts_reports_undercovered_volume():
+    counts = (
+        np.array([[[3, 2], [3, 3]]]),
+        np.array([[[3, 3], [1, 3]]]),
+        np.array([[[3, 3], [3, 0]]]),
+    )
+
+    coverage = _coverage_from_counts(counts, min_valid_count=3)
+
+    assert coverage.total == 4
+    assert coverage.accepted == 1
+    assert coverage.rejected == 3
+    assert coverage.rejected_fraction == pytest.approx(0.75)
+
+
 def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
     average_path = tmp_path / "mean.nc"
     with FlowDataset(tiny_flow_path) as flow:
@@ -140,6 +156,22 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
             raw_label="tiny_flow.nc",
             min_valid_count=1,
             n_times=flow.n_times,
+            volume_coverage=_coverage_from_counts(
+                (
+                    average._file["u_count"][:],
+                    average._file["v_count"][:],
+                    average._file["w_count"][:],
+                ),
+                min_valid_count=1,
+            ),
+            plane_coverage=_coverage_from_counts(
+                (
+                    average._file["u_count"][z_index, :, :],
+                    average._file["v_count"][z_index, :, :],
+                    average._file["w_count"][z_index, :, :],
+                ),
+                min_valid_count=1,
+            ),
         )
         assert "Raw value at selected frame" in report
         assert "raw source: tiny_flow.nc" in report
@@ -148,6 +180,9 @@ def test_inspect_cell_matches_raw_and_average(tiny_flow_path, tmp_path):
         assert "source: raw time series at this one cell only" in report
         assert "accepted" in report
         assert "Value stored in average file" in report
+        assert "Average-file coverage" in report
+        assert "empty volume:" in report
+        assert "empty shown z plane:" in report
 
 
 def test_inspect_cell_reports_interpolated_values(tmp_path):

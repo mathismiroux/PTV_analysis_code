@@ -48,6 +48,19 @@ class CellInspection:
     filled_w: bool | None = None
 
 
+@dataclass(frozen=True)
+class CoverageStats:
+    total: int
+    accepted: int
+    rejected: int
+
+    @property
+    def rejected_fraction(self) -> float:
+        if self.total == 0:
+            return float("nan")
+        return self.rejected / self.total
+
+
 def nearest_index(values: np.ndarray, value: float) -> int:
     return int(np.nanargmin(np.abs(values - value)))
 
@@ -109,6 +122,45 @@ def _rejected_overlay_rgba(accepted: np.ndarray) -> np.ndarray:
     overlay = np.zeros((*accepted.shape, 4), dtype=float)
     overlay[~accepted] = (0.95, 0.10, 0.10, 0.38)
     return overlay
+
+
+def _coverage_from_counts(
+    counts: tuple[np.ndarray, np.ndarray, np.ndarray],
+    min_valid_count: int,
+) -> CoverageStats:
+    u_count, v_count, w_count = counts
+    accepted = (
+        (u_count >= min_valid_count)
+        & (v_count >= min_valid_count)
+        & (w_count >= min_valid_count)
+    )
+    accepted_count = int(np.count_nonzero(accepted))
+    total = int(accepted.size)
+    return CoverageStats(
+        total=total,
+        accepted=accepted_count,
+        rejected=total - accepted_count,
+    )
+
+
+def _average_count_volumes(
+    average: TemporalAverageVolume,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if not all(f"{name}_count" in average._file for name in ("u", "v", "w")):
+        return None
+    return (
+        average._file["u_count"][:],
+        average._file["v_count"][:],
+        average._file["w_count"][:],
+    )
+
+
+def _format_coverage(prefix: str, coverage: CoverageStats) -> str:
+    percentage = 100.0 * coverage.rejected_fraction
+    return (
+        f"  {prefix}: empty={coverage.rejected}/{coverage.total} "
+        f"({percentage:.1f}%), accepted={coverage.accepted}"
+    )
 
 
 def _filled_image_alpha(filled: np.ndarray, filled_alpha: float = 0.45) -> np.ndarray:
@@ -364,6 +416,9 @@ def format_cell_inspection(
     raw_label: str = "raw file",
     min_valid_count: int = 1,
     n_times: int | None = None,
+    volume_coverage: CoverageStats | None = None,
+    plane_coverage: CoverageStats | None = None,
+    coverage_source: str = "average file counts",
 ) -> str:
     lines = [
         "Inspector mode",
@@ -399,6 +454,13 @@ def format_cell_inspection(
                 _format_mean("w", cell.average_w),
             ]
         )
+        lines.extend(["", "Average-file coverage", f"  source: {coverage_source}"])
+        if volume_coverage is None:
+            lines.append("  empty volume: unavailable; count datasets missing")
+        else:
+            lines.append(_format_coverage("empty volume", volume_coverage))
+        if plane_coverage is not None:
+            lines.append(_format_coverage("empty shown z plane", plane_coverage))
     else:
         lines.extend(
             [
@@ -546,6 +608,9 @@ def inspect_flow_gui(
     counts_for_fixed_z = _valid_counts_for_z_plane(
         flow, z_index, invalid_samples=invalid_samples
     )
+    average_count_volumes = (
+        _average_count_volumes(average) if average is not None else None
+    )
 
     def refresh() -> None:
         nonlocal frame_index
@@ -560,6 +625,17 @@ def inspect_flow_gui(
             counts_for_fixed_z,
             min_valid_count,
         )
+        volume_coverage = None
+        plane_coverage = None
+        if average_count_volumes is not None:
+            volume_coverage = _coverage_from_counts(
+                average_count_volumes,
+                min_valid_count,
+            )
+            plane_coverage = _coverage_from_counts(
+                tuple(count[z_index, :, :] for count in average_count_volumes),
+                min_valid_count,
+            )
         image.set_data(display_speed)
         rejected_overlay.set_data(_rejected_overlay_rgba(accepted))
         if interpolated is not None:
@@ -578,6 +654,11 @@ def inspect_flow_gui(
             f"t={plane.time:.6g}, "
             f"z={plane.z_value:.6g} (z_index={z_index}), "
             f"shown accepted={int(accepted.sum())}/{accepted.size}"
+            + (
+                f", avg empty volume={100.0 * volume_coverage.rejected_fraction:.1f}%"
+                if volume_coverage is not None
+                else ""
+            )
             + (
                 f", transparent filled cells={int(any_filled.sum())}/{any_filled.size}"
                 if interpolated is not None
@@ -601,6 +682,8 @@ def inspect_flow_gui(
                 raw_label=raw_label,
                 min_valid_count=min_valid_count,
                 n_times=flow.n_times,
+                volume_coverage=volume_coverage,
+                plane_coverage=plane_coverage,
             )
         )
         fig.canvas.draw_idle()

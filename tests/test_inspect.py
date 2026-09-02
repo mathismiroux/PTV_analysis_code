@@ -167,7 +167,6 @@ def test_inspect_cell_reports_interpolated_values(tmp_path):
             flow,
             interpolated_path,
             axes=("t",),
-            min_spatial_neighbors=0,
             zero_mask="vector",
         )
 

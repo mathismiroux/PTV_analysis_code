@@ -423,6 +423,31 @@ file size, creation time, operation, zero-mask mode, chunk size, and minimum
 valid-count settings. They also store the `invalid_samples` mode used for the
 analysis.
 
+### Extract A Z Slab
+
+For fast sensitivity studies, extract a thin raw-style slab around a selected
+`z` plane:
+
+```powershell
+python main.py "path\to\raw_file.nc" --extract-z-slab --z-slab-center 0 --z-slab-width 3 --output outputs\z0_w3_slab.nc
+```
+
+With `--z-slab-width 3`, the output keeps the nearest plane to
+`--z-slab-center` plus one neighboring `z` plane on each side. The output file
+still contains `t`, `z`, `y`, `x`, `u`, `v`, and `w`, but its velocity arrays
+have shape `(time, 3, y, x)`. The selected source z indices and nearest center
+coordinate are stored in the file metadata.
+
+The slab width must be odd so the slice has a clear center plane. If the
+requested slab would run outside the available z range, the command stops
+instead of silently clipping the selection.
+
+You can then run interpolation sensitivity tests on the smaller slab:
+
+```powershell
+python main.py outputs\z0_w3_slab.nc --interpolate-velocity --zero-mask vector --invalid-samples zero-or-nan --max-temporal-gap 1 --output outputs\z0_w3_interp_gap1.nc
+```
+
 ### Interpolate Velocity Holes
 
 Fill holes in a raw 4D velocity time series before computing wake products:
@@ -430,32 +455,31 @@ Fill holes in a raw 4D velocity time series before computing wake products:
 ```powershell
 python main.py "path\to\raw_file.nc" --interpolate-velocity --output outputs\interpolated_velocity.nc
 python main.py --case static_x3p5d --interpolate-velocity
-python main.py "path\to\raw_file.nc" --interpolate-velocity --invalid-samples zero-or-nan --interpolation-axes t z y x --max-temporal-gap 1 --interpolation-passes 3 --output outputs\interpolated_velocity.nc
+python main.py "path\to\raw_file.nc" --interpolate-velocity --invalid-samples zero-or-nan --interpolation-axes t z y x --max-temporal-gap 1 --max-spatial-gap 5 --interpolation-passes 3 --output outputs\interpolated_velocity.nc
 ```
 
 This is a non-physics-informed interpolation. The code converts selected holes
 to `NaN`, then applies one-dimensional linear interpolation sequentially along
 the requested axes. Original valid samples are preserved. The default axis order
 is `t z y x`, so temporal neighbors are used first, then the spatial grid.
-By default, each filled value needs at least 6 valid cells among the 8
-surrounding 3D corner neighbors at the same time index. Under-supported holes
-remain missing.
+Gap limits can keep the interpolation from crossing large missing regions.
 
 Options:
 
 - `--interpolation-axes t z y x`: choose the interpolation axes and their
   order. Use fewer axes when you want a stricter fill, for example
   `--interpolation-axes t`.
-- `--min-interpolation-neighbors 6`: choose how much support is required
-  around each hole. The default 6 requires 6 valid cells out of the 8
-  surrounding 3D corner neighbors.
 - `--interpolation-passes N`: repeat the selected axis sequence up to `N`
-  times. Later passes may use values filled by earlier passes when checking
-  the 3D neighbor support. The command stops early if a pass fills nothing.
+  times. Later passes may use values filled by earlier passes. The command
+  stops early if a pass fills nothing.
 - `--max-temporal-gap N`: limit temporal interpolation to brackets at most `N`
   frames away on each side of the missing frame. Use `--max-temporal-gap 1`
   for strict `t-1` and `t+1` interpolation. If omitted, temporal brackets can
   be farther away.
+- `--max-spatial-gap N`: limit spatial interpolation to brackets at most `N`
+  voxels away on each side along `z`, `y`, or `x`. Use this to avoid filling
+  wide spatial gaps; for example, `--max-spatial-gap 5` will not fill a point
+  whose nearest valid spatial brackets are 30 voxels away.
 - `--interpolation-workers N`: interpolate multiple velocity components at the
   same time. Use `--interpolation-workers 3` to process `u`, `v`, and `w` in
   parallel when RAM allows it.

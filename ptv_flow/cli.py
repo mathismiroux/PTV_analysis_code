@@ -10,6 +10,7 @@ from ptv_flow.postprocess import (
     REYNOLDS_STRESS_COMPONENTS,
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
+    extract_z_slab,
     reynolds_stresses,
     spatio_temporal_interpolate_velocity,
     temporal_average_volume,
@@ -97,9 +98,9 @@ def _compute_case_interpolated_velocity(
     flow: FlowDataset,
     output: Path,
     axes: list[str],
-    min_spatial_neighbors: int,
     passes: int,
     max_temporal_gap: int | None,
+    max_spatial_gap: int | None,
     workers: int,
     zero_mask: str,
     overwrite: bool,
@@ -110,14 +111,35 @@ def _compute_case_interpolated_velocity(
         flow,
         output=output,
         axes=axes,
-        min_spatial_neighbors=min_spatial_neighbors,
         passes=passes,
         max_temporal_gap=max_temporal_gap,
+        max_spatial_gap=max_spatial_gap,
         workers=workers,
         zero_mask=zero_mask,
         overwrite=overwrite,
         metadata=metadata,
         invalid_samples=invalid_samples,
+    )
+
+
+def _compute_case_z_slab(
+    flow_case: FlowCase,
+    flow: FlowDataset,
+    output: Path,
+    z_center: float,
+    z_width: int,
+    chunk_size: int,
+    overwrite: bool,
+) -> Path:
+    metadata = _case_metadata(flow_case, output.parent.name)
+    return extract_z_slab(
+        flow,
+        output=output,
+        z_center=z_center,
+        z_width=z_width,
+        chunk_size=chunk_size,
+        overwrite=overwrite,
+        metadata=metadata,
     )
 
 
@@ -272,6 +294,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--extract-z-slab",
+        action="store_true",
+        help="write a smaller raw-style velocity file containing a centered z slab",
+    )
+    parser.add_argument(
+        "--z-slab-center",
+        type=float,
+        default=0.0,
+        help="z coordinate used as the center of --extract-z-slab",
+    )
+    parser.add_argument(
+        "--z-slab-width",
+        type=int,
+        default=3,
+        help="odd number of z voxels to keep for --extract-z-slab",
+    )
+    parser.add_argument(
         "--interpolation-axes",
         nargs="+",
         choices=("t", "z", "y", "x"),
@@ -282,13 +321,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--min-interpolation-neighbors",
+        "--max-spatial-gap",
         type=int,
-        default=6,
+        default=None,
         help=(
-            "minimum number of valid 3D corner neighbors required around a "
-            "hole; default 6 means at least 6 out of the 8 surrounding "
-            "spatial cells at the same time"
+            "maximum voxel-index distance to the valid bracketing samples used "
+            "for spatial interpolation along z, y, or x; omit for no spatial "
+            "distance limit"
         ),
     )
     parser.add_argument(
@@ -597,7 +636,42 @@ def main() -> None:
         return
 
     with FlowDataset(raw_path) as flow:
-        if args.interpolate_velocity:
+        if args.extract_z_slab:
+            output = args.output
+            if output is None:
+                if flow_case is not None:
+                    output = flow_case.default_output_path(
+                        f"z_slab_w{args.z_slab_width}.nc",
+                        unique=not args.overwrite,
+                    )
+                else:
+                    output = (
+                        Path("outputs")
+                        / f"{raw_path.stem}_zslab_w{args.z_slab_width}.nc"
+                    )
+            try:
+                if flow_case is not None:
+                    _compute_case_z_slab(
+                        flow_case=flow_case,
+                        flow=flow,
+                        output=output,
+                        z_center=args.z_slab_center,
+                        z_width=args.z_slab_width,
+                        chunk_size=args.chunk_size,
+                        overwrite=args.overwrite,
+                    )
+                else:
+                    extract_z_slab(
+                        flow,
+                        output=output,
+                        z_center=args.z_slab_center,
+                        z_width=args.z_slab_width,
+                        chunk_size=args.chunk_size,
+                        overwrite=args.overwrite,
+                    )
+            except FileExistsError as exc:
+                raise SystemExit(str(exc)) from exc
+        elif args.interpolate_velocity:
             output = args.output
             if output is None:
                 if flow_case is not None:
@@ -614,9 +688,9 @@ def main() -> None:
                         flow=flow,
                         output=output,
                         axes=args.interpolation_axes,
-                        min_spatial_neighbors=args.min_interpolation_neighbors,
                         passes=args.interpolation_passes,
                         max_temporal_gap=args.max_temporal_gap,
+                        max_spatial_gap=args.max_spatial_gap,
                         workers=args.interpolation_workers,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,
@@ -627,9 +701,9 @@ def main() -> None:
                         flow,
                         output=output,
                         axes=args.interpolation_axes,
-                        min_spatial_neighbors=args.min_interpolation_neighbors,
                         passes=args.interpolation_passes,
                         max_temporal_gap=args.max_temporal_gap,
+                        max_spatial_gap=args.max_spatial_gap,
                         workers=args.interpolation_workers,
                         zero_mask=args.zero_mask,
                         overwrite=args.overwrite,

@@ -51,6 +51,7 @@ def _interpolate_along_axis(
     coordinates: np.ndarray,
     eligible: np.ndarray,
     max_index_gap: int | None = None,
+    max_bracket_span: int | None = None,
 ) -> np.ndarray:
     moved = np.moveaxis(data, axis, 0)
     moved_eligible = np.moveaxis(eligible, axis, 0)
@@ -76,6 +77,8 @@ def _interpolate_along_axis(
         bracketed &= (axis_indices - left_indices <= max_index_gap) & (
             right_indices - axis_indices <= max_index_gap
         )
+    if max_bracket_span is not None:
+        bracketed &= right_indices - left_indices <= max_bracket_span
     if not np.any(bracketed):
         return data
 
@@ -102,44 +105,18 @@ def _interpolate_along_axis(
     return np.moveaxis(filled.reshape(moved.shape), 0, axis)
 
 
-def _spatial_corner_neighbor_count(valid: np.ndarray) -> np.ndarray:
-    counts = np.zeros(valid.shape, dtype=np.uint8)
-    for z_offset in (-1, 1):
-        source_z = slice(max(0, -z_offset), valid.shape[1] - max(0, z_offset))
-        target_z = slice(max(0, z_offset), valid.shape[1] - max(0, -z_offset))
-        for y_offset in (-1, 1):
-            source_y = slice(max(0, -y_offset), valid.shape[2] - max(0, y_offset))
-            target_y = slice(max(0, y_offset), valid.shape[2] - max(0, -y_offset))
-            for x_offset in (-1, 1):
-                source_x = slice(max(0, -x_offset), valid.shape[3] - max(0, x_offset))
-                target_x = slice(max(0, x_offset), valid.shape[3] - max(0, -x_offset))
-                counts[:, target_z, target_y, target_x] += valid[
-                    :,
-                    source_z,
-                    source_y,
-                    source_x,
-                ]
-    return counts
-
-
 def _interpolate_component_passes(
     data: np.ndarray,
     hole_mask: np.ndarray,
     coordinates: Mapping[str, np.ndarray],
     axes: Sequence[str],
-    min_spatial_neighbors: int,
     passes: int,
     max_temporal_gap: int | None,
+    max_spatial_gap: int | None,
 ) -> np.ndarray:
     for _pass_index in range(passes):
         missing = hole_mask & ~np.isfinite(data)
         if not np.any(missing):
-            break
-
-        valid = np.isfinite(data)
-        neighbor_counts = _spatial_corner_neighbor_count(valid)
-        eligible = missing & (neighbor_counts >= min_spatial_neighbors)
-        if not np.any(eligible):
             break
 
         filled_before = int(np.count_nonzero(hole_mask & np.isfinite(data)))
@@ -148,8 +125,9 @@ def _interpolate_component_passes(
                 data,
                 axis=_AXIS_TO_DIM[axis_name],
                 coordinates=coordinates[axis_name],
-                eligible=eligible,
+                eligible=missing,
                 max_index_gap=max_temporal_gap if axis_name == "t" else None,
+                max_bracket_span=max_spatial_gap if axis_name != "t" else None,
             )
         filled_after = int(np.count_nonzero(hole_mask & np.isfinite(data)))
         if filled_after == filled_before:
@@ -164,9 +142,9 @@ def _interpolate_component_result(
     before_missing: int,
     coordinates: Mapping[str, np.ndarray],
     axes: Sequence[str],
-    min_spatial_neighbors: int,
     passes: int,
     max_temporal_gap: int | None,
+    max_spatial_gap: int | None,
 ) -> tuple[str, np.ndarray, np.ndarray, int, int, int]:
     original_data = data.copy()
     data[hole_mask] = np.nan
@@ -175,9 +153,9 @@ def _interpolate_component_result(
         hole_mask=hole_mask,
         coordinates=coordinates,
         axes=axes,
-        min_spatial_neighbors=min_spatial_neighbors,
         passes=passes,
         max_temporal_gap=max_temporal_gap,
+        max_spatial_gap=max_spatial_gap,
     )
 
     filled_mask = hole_mask & np.isfinite(data)
@@ -645,13 +623,142 @@ def apply_valid_fraction_to_average(
     return output
 
 
+def z_slab_indices(
+    z_values: np.ndarray,
+    center: float,
+    width: int,
+) -> tuple[int, int, int]:
+    """Return ``(start, stop, center_index)`` for a centered z slab."""
+
+    if width <= 0:
+        raise ValueError("z slab width must be positive")
+    if width % 2 == 0:
+        raise ValueError("z slab width must be odd so it has a center plane")
+
+    center_index = int(np.nanargmin(np.abs(z_values - center)))
+    half_width = width // 2
+    start = center_index - half_width
+    stop = center_index + half_width + 1
+    if start < 0 or stop > z_values.size:
+        raise ValueError(
+            "Requested z slab does not fit in the available z range: "
+            f"center={center:g}, nearest_index={center_index}, width={width}, "
+            f"available_indices=[0, {z_values.size - 1}]"
+        )
+    return start, stop, center_index
+
+
+def extract_z_slab(
+    flow: FlowDataset,
+    output: Path,
+    z_center: float = 0.0,
+    z_width: int = 3,
+    chunk_size: int = 50,
+    overwrite: bool = False,
+    metadata: Mapping[str, str | float] | None = None,
+) -> Path:
+    """Write a raw-style velocity file containing a centered z slab."""
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    output, temporary_output = _prepare_output_path(output, overwrite)
+    z_values = flow.coordinate("z")
+    z_start, z_stop, z_center_index = z_slab_indices(
+        z_values,
+        center=z_center,
+        width=z_width,
+    )
+
+    print(f"Reading NetCDF file: {flow.path.resolve()}", flush=True)
+    print(
+        f"Extracting z slab centered near {z_center:g}: "
+        f"indices={z_start}:{z_stop}, "
+        f"nearest_center_z={z_values[z_center_index]:.6g}, "
+        f"shape={(flow.n_times, z_width, flow.grid_shape[1], flow.grid_shape[2])}",
+        flush=True,
+    )
+
+    try:
+        with h5py.File(temporary_output, "w") as out:
+            source_path = flow.path.resolve()
+            if metadata is not None:
+                for key, value in metadata.items():
+                    out.attrs[key] = value
+            out.attrs["source_file"] = str(source_path)
+            out.attrs["source_file_name"] = source_path.name
+            out.attrs["source_file_parent"] = str(source_path.parent)
+            out.attrs["source_file_size_bytes"] = source_path.stat().st_size
+            out.attrs["created_utc"] = datetime.now(timezone.utc).isoformat()
+            out.attrs["created_by"] = "ptv-flow"
+            out.attrs["operation"] = "extract_z_slab"
+            out.attrs["input_shape_time_z_y_x"] = flow.shape
+            out.attrs["output_shape_time_z_y_x"] = (
+                flow.n_times,
+                z_width,
+                flow.grid_shape[1],
+                flow.grid_shape[2],
+            )
+            out.attrs["requested_z_center"] = float(z_center)
+            out.attrs["nearest_z_center"] = float(z_values[z_center_index])
+            out.attrs["source_z_center_index"] = z_center_index
+            out.attrs["source_z_start_index"] = z_start
+            out.attrs["source_z_stop_index"] = z_stop
+            out.attrs["z_width_voxels"] = z_width
+
+            provenance = out.create_group("provenance")
+            if metadata is not None:
+                for key, value in metadata.items():
+                    provenance.attrs[key] = value
+            provenance.attrs["source_file"] = str(source_path)
+            provenance.attrs["created_utc"] = out.attrs["created_utc"]
+            provenance.attrs["operation"] = out.attrs["operation"]
+            provenance.attrs["requested_z_center"] = float(z_center)
+            provenance.attrs["nearest_z_center"] = float(z_values[z_center_index])
+            provenance.attrs["source_z_center_index"] = z_center_index
+            provenance.attrs["source_z_start_index"] = z_start
+            provenance.attrs["source_z_stop_index"] = z_stop
+            provenance.attrs["z_width_voxels"] = z_width
+
+            out.create_dataset("t", data=flow.coordinate("t"))
+            out.create_dataset("z", data=z_values[z_start:z_stop])
+            out.create_dataset("y", data=flow.coordinate("y"))
+            out.create_dataset("x", data=flow.coordinate("x"))
+
+            for name in VELOCITY_COMPONENTS:
+                dataset = out.create_dataset(
+                    name,
+                    shape=(flow.n_times, z_width, flow.grid_shape[1], flow.grid_shape[2]),
+                    dtype=flow._file[name].dtype,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                for start in range(0, flow.n_times, chunk_size):
+                    stop = min(start + chunk_size, flow.n_times)
+                    dataset[start:stop, :, :, :] = flow._file[name][
+                        start:stop,
+                        z_start:z_stop,
+                        :,
+                        :,
+                    ]
+
+        temporary_output.replace(output)
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    print(f"Saved z slab to: {output.resolve()}", flush=True)
+    return output
+
+
 def spatio_temporal_interpolate_velocity(
     flow: FlowDataset,
     output: Path,
     axes: Sequence[str] = INTERPOLATION_AXES,
-    min_spatial_neighbors: int = 6,
     passes: int = 1,
     max_temporal_gap: int | None = None,
+    max_spatial_gap: int | None = None,
     workers: int = 1,
     zero_mask: str = "component",
     overwrite: bool = False,
@@ -668,12 +775,12 @@ def spatio_temporal_interpolate_velocity(
     if zero_mask not in {"component", "vector"}:
         raise ValueError("zero_mask must be 'component' or 'vector'")
     validate_invalid_samples(invalid_samples)
-    if not 0 <= min_spatial_neighbors <= 8:
-        raise ValueError("min_spatial_neighbors must be between 0 and 8")
     if passes <= 0:
         raise ValueError("passes must be positive")
     if max_temporal_gap is not None and max_temporal_gap <= 0:
         raise ValueError("max_temporal_gap must be positive when provided")
+    if max_spatial_gap is not None and max_spatial_gap <= 0:
+        raise ValueError("max_spatial_gap must be positive when provided")
     if workers <= 0:
         raise ValueError("workers must be positive")
     workers = min(workers, len(VELOCITY_COMPONENTS))
@@ -688,9 +795,9 @@ def spatio_temporal_interpolate_velocity(
     print(
         "Interpolating velocity fields, "
         f"shape={flow.shape}, axes={','.join(selected_axes)}, "
-        f"min_spatial_neighbors={min_spatial_neighbors}/8, "
         f"passes={passes}, "
         f"max_temporal_gap={max_temporal_gap if max_temporal_gap is not None else 'none'}, "
+        f"max_spatial_gap={max_spatial_gap if max_spatial_gap is not None else 'none'}, "
         f"workers={workers}, "
         f"zero_mask={zero_mask}, invalid_samples={invalid_samples}",
         flush=True,
@@ -714,11 +821,12 @@ def spatio_temporal_interpolate_velocity(
                 selected_axes,
                 dtype=h5py.string_dtype(),
             )
-            out.attrs["min_interpolation_neighbors"] = min_spatial_neighbors
-            out.attrs["interpolation_neighbor_definition"] = "3d_corner_neighbors"
             out.attrs["interpolation_passes"] = passes
             out.attrs["max_temporal_gap"] = (
                 -1 if max_temporal_gap is None else max_temporal_gap
+            )
+            out.attrs["max_spatial_gap"] = (
+                -1 if max_spatial_gap is None else max_spatial_gap
             )
             out.attrs["interpolation_workers"] = workers
             out.attrs["zero_mask"] = zero_mask
@@ -734,12 +842,9 @@ def spatio_temporal_interpolate_velocity(
             provenance.attrs["operation"] = out.attrs["operation"]
             provenance.attrs["method"] = out.attrs["method"]
             provenance.attrs["interpolation_axes"] = out.attrs["interpolation_axes"]
-            provenance.attrs["min_interpolation_neighbors"] = min_spatial_neighbors
-            provenance.attrs["interpolation_neighbor_definition"] = (
-                out.attrs["interpolation_neighbor_definition"]
-            )
             provenance.attrs["interpolation_passes"] = passes
             provenance.attrs["max_temporal_gap"] = out.attrs["max_temporal_gap"]
+            provenance.attrs["max_spatial_gap"] = out.attrs["max_spatial_gap"]
             provenance.attrs["interpolation_workers"] = workers
             provenance.attrs["zero_mask"] = zero_mask
             provenance.attrs["invalid_samples"] = invalid_samples
@@ -791,9 +896,9 @@ def spatio_temporal_interpolate_velocity(
                         before_missing,
                         coordinates,
                         selected_axes,
-                        min_spatial_neighbors,
                         passes,
                         max_temporal_gap,
+                        max_spatial_gap,
                     )
                 )
 

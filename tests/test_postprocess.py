@@ -6,6 +6,7 @@ import numpy as np
 from ptv_flow.postprocess import (
     TemporalAverageVolume,
     apply_valid_fraction_to_average,
+    extract_z_slab,
     reynolds_stresses,
     spatio_temporal_interpolate_velocity,
     temporal_average_volume,
@@ -339,6 +340,44 @@ def test_apply_valid_fraction_to_existing_average(tmp_path):
         assert out["provenance"].attrs["derived_from_file"].endswith("mean.nc")
 
 
+def test_extract_z_slab_keeps_centered_three_voxel_width(tmp_path):
+    raw = tmp_path / "full.nc"
+    u = np.arange(2 * 5 * 3 * 4, dtype=np.float32).reshape(2, 5, 3, 4)
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.array([0.0, 1.0], dtype=np.float32))
+        h5.create_dataset("z", data=np.array([-2.0, -1.0, 0.0, 1.0, 2.0]))
+        h5.create_dataset("y", data=np.arange(3, dtype=np.float32))
+        h5.create_dataset("x", data=np.arange(4, dtype=np.float32))
+        h5.create_dataset("u", data=u)
+        h5.create_dataset("v", data=u + 100.0)
+        h5.create_dataset("w", data=u + 200.0)
+
+    output = tmp_path / "z_slab.nc"
+    with FlowDataset(raw) as flow:
+        extract_z_slab(flow, output=output, z_center=0.0, z_width=3, chunk_size=1)
+
+    with h5py.File(output, "r") as out:
+        assert out.attrs["operation"] == "extract_z_slab"
+        assert out.attrs["source_z_start_index"] == 1
+        assert out.attrs["source_z_stop_index"] == 4
+        assert out.attrs["source_z_center_index"] == 2
+        assert out.attrs["z_width_voxels"] == 3
+        np.testing.assert_array_equal(out["z"][:], [-1.0, 0.0, 1.0])
+        np.testing.assert_array_equal(out["u"][:], u[:, 1:4, :, :])
+        np.testing.assert_array_equal(out["v"][:], u[:, 1:4, :, :] + 100.0)
+        np.testing.assert_array_equal(out["w"][:], u[:, 1:4, :, :] + 200.0)
+
+
+def test_extract_z_slab_rejects_even_width(tiny_flow_path, tmp_path):
+    with FlowDataset(tiny_flow_path) as flow:
+        try:
+            extract_z_slab(flow, tmp_path / "slab.nc", z_width=2)
+        except ValueError as exc:
+            assert "must be odd" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
+
+
 def test_spatio_temporal_interpolation_fills_holes_and_preserves_data(tmp_path):
     raw = tmp_path / "holes.nc"
     with h5py.File(raw, "w") as h5:
@@ -365,7 +404,6 @@ def test_spatio_temporal_interpolation_fills_holes_and_preserves_data(tmp_path):
             flow,
             output=output,
             axes=("t", "x"),
-            min_spatial_neighbors=0,
             invalid_samples="zero",
         )
 
@@ -403,7 +441,6 @@ def test_spatio_temporal_interpolation_vector_mask(tmp_path):
             flow,
             output=output,
             axes=("t",),
-            min_spatial_neighbors=0,
             zero_mask="vector",
         )
 
@@ -413,66 +450,41 @@ def test_spatio_temporal_interpolation_vector_mask(tmp_path):
             assert bool(out[f"{name}_filled_mask"][1, 0, 0, 0])
 
 
-def test_spatio_temporal_interpolation_requires_six_3d_neighbors_by_default(tmp_path):
-    raw = tmp_path / "under_supported_hole.nc"
+def test_spatio_temporal_interpolation_respects_max_spatial_gap(tmp_path):
+    raw = tmp_path / "spatial_gap.nc"
+    data = np.array([[[[1.0, 0.0, 0.0, 0.0, 5.0]]]])
     with h5py.File(raw, "w") as h5:
-        h5.create_dataset("t", data=np.arange(7, dtype=np.float32))
+        h5.create_dataset("t", data=np.array([0.0], dtype=np.float32))
         h5.create_dataset("z", data=np.array([0.0], dtype=np.float32))
         h5.create_dataset("y", data=np.array([0.0], dtype=np.float32))
-        h5.create_dataset("x", data=np.array([0.0], dtype=np.float32))
-        data = np.array(
-            [
-                [[[1.0]]],
-                [[[2.0]]],
-                [[[3.0]]],
-                [[[0.0]]],
-                [[[5.0]]],
-                [[[6.0]]],
-                [[[0.0]]],
-            ]
+        h5.create_dataset("x", data=np.arange(5, dtype=np.float32))
+        h5.create_dataset("u", data=data)
+        h5.create_dataset("v", data=data)
+        h5.create_dataset("w", data=data)
+
+    max_two = tmp_path / "max_two.nc"
+    max_four = tmp_path / "max_four.nc"
+    with FlowDataset(raw) as flow:
+        spatio_temporal_interpolate_velocity(
+            flow,
+            output=max_two,
+            axes=("x",),
+            max_spatial_gap=2,
         )
-        h5.create_dataset("u", data=data)
-        h5.create_dataset("v", data=data)
-        h5.create_dataset("w", data=data)
+        spatio_temporal_interpolate_velocity(
+            flow,
+            output=max_four,
+            axes=("x",),
+            max_spatial_gap=4,
+        )
 
-    output = tmp_path / "interpolated.nc"
-    with FlowDataset(raw) as flow:
-        spatio_temporal_interpolate_velocity(flow, output=output, axes=("t",))
-
-    with h5py.File(output, "r") as out:
-        assert out.attrs["min_interpolation_neighbors"] == 6
-        assert out.attrs["interpolation_neighbor_definition"] == "3d_corner_neighbors"
-        assert np.isnan(out["u"][3, 0, 0, 0])
-        assert np.isnan(out["u"][6, 0, 0, 0])
-        assert not bool(out["u_filled_mask"][3, 0, 0, 0])
-        assert out.attrs["u_remaining_missing_count"] == 2
-
-
-def test_spatio_temporal_interpolation_allows_six_of_eight_3d_neighbors(tmp_path):
-    raw = tmp_path / "supported_3d_hole.nc"
-    data = np.ones((3, 3, 3, 3), dtype=float)
-    data[0, 1, 1, 1] = 1.0
-    data[1, 1, 1, 1] = 0.0
-    data[2, 1, 1, 1] = 3.0
-    for index in ((0, 0, 0), (0, 0, 2)):
-        data[1, index[0], index[1], index[2]] = 0.0
-
-    with h5py.File(raw, "w") as h5:
-        h5.create_dataset("t", data=np.arange(3, dtype=np.float32))
-        h5.create_dataset("z", data=np.arange(3, dtype=np.float32))
-        h5.create_dataset("y", data=np.arange(3, dtype=np.float32))
-        h5.create_dataset("x", data=np.arange(3, dtype=np.float32))
-        h5.create_dataset("u", data=data)
-        h5.create_dataset("v", data=data)
-        h5.create_dataset("w", data=data)
-
-    output = tmp_path / "interpolated.nc"
-    with FlowDataset(raw) as flow:
-        spatio_temporal_interpolate_velocity(flow, output=output, axes=("t",))
-
-    with h5py.File(output, "r") as out:
-        assert out["u"][1, 1, 1, 1] == 2.0
-        assert bool(out["u_filled_mask"][1, 1, 1, 1])
+    with h5py.File(max_two, "r") as two, h5py.File(max_four, "r") as four:
+        assert two.attrs["max_spatial_gap"] == 2
+        assert four.attrs["max_spatial_gap"] == 4
+        assert np.isnan(two["u"][0, 0, 0, 2])
+        assert four["u"][0, 0, 0, 2] == 3.0
+        assert not bool(two["u_filled_mask"][0, 0, 0, 2])
+        assert bool(four["u_filled_mask"][0, 0, 0, 2])
 
 
 def test_spatio_temporal_interpolation_vector_mode_reuses_hole_mask(tmp_path):
@@ -549,7 +561,7 @@ def test_spatio_temporal_interpolation_parallel_workers_match_serial(tmp_path):
             )
 
 
-def test_spatio_temporal_interpolation_multiple_passes_expand_fill(tmp_path):
+def test_spatio_temporal_interpolation_records_multiple_passes(tmp_path):
     raw = tmp_path / "multi_pass.nc"
     data = np.ones((3, 5, 5, 5), dtype=float)
     data[2, :, :, :] = 3.0
@@ -570,16 +582,8 @@ def test_spatio_temporal_interpolation_multiple_passes_expand_fill(tmp_path):
         h5.create_dataset("v", data=data)
         h5.create_dataset("w", data=data)
 
-    one_pass = tmp_path / "one_pass.nc"
     two_passes = tmp_path / "two_passes.nc"
     with FlowDataset(raw) as flow:
-        spatio_temporal_interpolate_velocity(
-            flow,
-            output=one_pass,
-            axes=("t",),
-            passes=1,
-            overwrite=True,
-        )
         spatio_temporal_interpolate_velocity(
             flow,
             output=two_passes,
@@ -588,13 +592,10 @@ def test_spatio_temporal_interpolation_multiple_passes_expand_fill(tmp_path):
             overwrite=True,
         )
 
-    with h5py.File(one_pass, "r") as one, h5py.File(two_passes, "r") as two:
-        assert one.attrs["interpolation_passes"] == 1
+    with h5py.File(two_passes, "r") as two:
         assert two.attrs["interpolation_passes"] == 2
-        assert one["u"][1, 1, 1, 1] == 2.0
-        assert np.isnan(one["u"][1, 2, 2, 2])
         assert two["u"][1, 2, 2, 2] == 2.0
-        assert one.attrs["u_filled_count"] < two.attrs["u_filled_count"]
+        assert two.attrs["u_filled_count"] == 4
 
 
 def test_spatio_temporal_interpolation_respects_max_temporal_gap(tmp_path):

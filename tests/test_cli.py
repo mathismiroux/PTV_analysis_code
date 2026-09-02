@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import h5py
+import numpy as np
 
 from ptv_flow.cli import _invalid_samples_from_average, _invalid_samples_from_interpolated
 from ptv_flow.postprocess import TemporalAverageVolume
@@ -25,10 +26,13 @@ def test_cli_help_runs():
     assert "--compare-average" in result.stdout
     assert "--interpolated-file" in result.stdout
     assert "--compare-interpolated" in result.stdout
-    assert "--min-interpolation-neighbors" in result.stdout
+    assert "--max-spatial-gap" in result.stdout
     assert "--interpolation-passes" in result.stdout
     assert "--max-temporal-gap" in result.stdout
     assert "--interpolation-workers" in result.stdout
+    assert "--extract-z-slab" in result.stdout
+    assert "--z-slab-center" in result.stdout
+    assert "--z-slab-width" in result.stdout
     assert "--min-valid-fraction" in result.stdout
     assert "--invalid-samples" in result.stdout
     assert "--quantity" in result.stdout
@@ -490,6 +494,39 @@ def test_cli_apply_valid_fraction_to_existing_average(tiny_flow_path, tmp_path):
     )
 
     assert filtered_output.exists()
+
+
+def test_cli_extract_z_slab(tiny_flow_path, tmp_path):
+    output = tmp_path / "slab.nc"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            str(tiny_flow_path),
+            "--extract-z-slab",
+            "--z-slab-center",
+            "0",
+            "--z-slab-width",
+            "3",
+            "--output",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert output.exists()
+    with h5py.File(tiny_flow_path, "r") as src, h5py.File(output, "r") as out:
+        center_index = int(abs(src["z"][:] - 0.0).argmin())
+        np.testing.assert_array_equal(out["z"][:], src["z"][center_index - 1 : center_index + 2])
+        assert out["u"].shape == (
+            src["t"].shape[0],
+            3,
+            src["y"].shape[0],
+            src["x"].shape[0],
+        )
 
 
 def test_cli_tke_from_temporal_average(tiny_flow_path, tmp_path):

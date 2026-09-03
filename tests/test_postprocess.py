@@ -124,6 +124,7 @@ def test_phase_average_recovers_phase_bins_and_harmonic(tmp_path):
             out["u_coherent"][:, 0, 0, 0],
             u[:, 0, 0, 0][0:4] - 10.0,
         )
+        np.testing.assert_allclose(out["u_harmonic_offset"][0, 0, 0], 10.0, atol=1e-12)
         np.testing.assert_allclose(out["u_harmonic_a"][0, 0, 0], 2.0, atol=1e-12)
         np.testing.assert_allclose(out["u_harmonic_b"][0, 0, 0], -3.0, atol=1e-12)
         np.testing.assert_allclose(
@@ -139,6 +140,26 @@ def test_phase_average_recovers_phase_bins_and_harmonic(tmp_path):
             out["wake_deficit_coherent"][:, 0, 0, 0],
             -out["u_coherent"][:, 0, 0, 0] / 4.0,
         )
+
+
+def test_first_harmonic_fit_keeps_mean_out_of_amplitude_with_missing_bin():
+    from ptv_flow.postprocess import TWO_PI, _first_harmonic_from_phase_means
+
+    phase_centers = (np.arange(4, dtype=np.float64) + 0.5) * TWO_PI / 4.0
+    values = 10.0 + 2.0 * np.cos(phase_centers) - 3.0 * np.sin(phase_centers)
+    values = values.reshape(4, 1, 1, 1)
+    values[2, 0, 0, 0] = np.nan
+
+    offset, a, b, amplitude, phase = _first_harmonic_from_phase_means(
+        values,
+        phase_centers,
+    )
+
+    np.testing.assert_allclose(offset[0, 0, 0], 10.0, atol=1e-12)
+    np.testing.assert_allclose(a[0, 0, 0], 2.0, atol=1e-12)
+    np.testing.assert_allclose(b[0, 0, 0], -3.0, atol=1e-12)
+    np.testing.assert_allclose(amplitude[0, 0, 0], np.sqrt(13.0), atol=1e-12)
+    assert np.isfinite(phase[0, 0, 0])
 
 
 def test_phase_average_from_frequency_masks_sparse_bins(tmp_path):
@@ -1007,4 +1028,25 @@ def test_phase_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
         )
         assert coherent_plane["field"] == "coherent"
         assert coherent_plane["speed"].shape == (5, 6)
-        assert x_plane["speed"].shape == (3, 5)
+
+        phase_series = volume.read_phase_series_at(
+            z_index=1,
+            y_index=2,
+            x_index=3,
+            field="phase_mean",
+        )
+        assert phase_series["field"] == "phase_mean"
+        assert phase_series["phase_degrees"].shape == (2,)
+        assert phase_series["u"].shape == (2,)
+        assert phase_series["u_count"].shape == (2,)
+
+        harmonic_plane = volume.read_harmonic_plane(
+            axis="z",
+            index=1,
+            component="u",
+            quantity="amplitude",
+        )
+        assert harmonic_plane["horizontal_axis"] == "x"
+        assert harmonic_plane["vertical_axis"] == "y"
+        assert harmonic_plane["dataset"] == "u_harmonic_amplitude"
+        assert harmonic_plane["data"].shape == (5, 6)

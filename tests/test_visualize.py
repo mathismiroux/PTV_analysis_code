@@ -4,11 +4,42 @@ import numpy as np
 import pytest
 
 from ptv_flow.visualize import (
+    _apply_harmonic_valid_fraction,
     _apply_phase_plane_valid_fraction,
     _apply_plane_valid_fraction,
     _phase_average_quantity,
     _temporal_average_quantity,
 )
+
+
+def _write_minimal_phase_average(path):
+    import h5py
+
+    with h5py.File(path, "w") as h5:
+        shape = (3, 1, 1, 1)
+        h5.create_dataset("x", data=np.array([1.0]))
+        h5.create_dataset("y", data=np.array([2.0]))
+        h5.create_dataset("z", data=np.array([3.0]))
+        h5.create_dataset("phase", data=np.array([0.0, 2.0, 4.0]))
+        h5.create_dataset("phase_degrees", data=np.array([0.0, 120.0, 240.0]))
+        h5.create_dataset("phase_sample_count", data=np.array([4, 4, 4], dtype=np.uint32))
+        for component, values in {
+            "u": [1.0, 2.0, 1.0],
+            "v": [0.0, 1.0, 0.0],
+            "w": [-1.0, 0.0, -1.0],
+        }.items():
+            h5.create_dataset(
+                f"{component}_phase_mean",
+                data=np.asarray(values, dtype=np.float64).reshape(shape),
+            )
+            h5.create_dataset(
+                f"{component}_coherent",
+                data=np.asarray(values, dtype=np.float64).reshape(shape) - 1.0,
+            )
+            h5.create_dataset(
+                f"{component}_phase_count",
+                data=np.array([4, 2, 4], dtype=np.uint32).reshape(shape),
+            )
 
 
 def test_temporal_average_quantity_selection():
@@ -112,3 +143,65 @@ def test_apply_phase_plane_valid_fraction_masks_component():
 
     assert masked[0, 0] == 1.0
     assert np.isnan(masked[0, 1])
+
+
+def test_apply_harmonic_valid_fraction_requires_all_phase_bins(tmp_path):
+    from ptv_flow.postprocess import PhaseAverageVolume
+
+    path = tmp_path / "phase_average.nc"
+    import h5py
+
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("x", data=np.array([0.0, 1.0]))
+        h5.create_dataset("y", data=np.array([0.0, 1.0]))
+        h5.create_dataset("z", data=np.array([0.0]))
+        h5.create_dataset("phase", data=np.array([0.0, np.pi]))
+        h5.create_dataset("phase_sample_count", data=np.array([4, 4], dtype=np.uint32))
+        h5.create_dataset(
+            "u_phase_count",
+            data=np.array(
+                [
+                    [[[3, 3], [3, 3]]],
+                    [[[3, 1], [3, 3]]],
+                ],
+                dtype=np.uint32,
+            ),
+        )
+        h5.create_dataset("v_phase_count", data=np.ones((2, 1, 2, 2), dtype=np.uint32))
+        h5.create_dataset("w_phase_count", data=np.ones((2, 1, 2, 2), dtype=np.uint32))
+
+    scalar = np.array([[1.0, 2.0], [3.0, 4.0]])
+    with PhaseAverageVolume(path) as volume:
+        masked, accepted = _apply_harmonic_valid_fraction(
+            volume,
+            scalar,
+            plane_axis="z",
+            plane_index=0,
+            component="u",
+            min_valid_fraction=0.5,
+        )
+
+    assert accepted == 3
+    assert masked[0, 0] == 1.0
+    assert np.isnan(masked[0, 1])
+
+
+def test_show_phase_voxel_series_saves_file(tmp_path):
+    from ptv_flow.postprocess import PhaseAverageVolume
+    from ptv_flow.visualize import show_phase_voxel_series
+
+    path = tmp_path / "phase_average.nc"
+    output = tmp_path / "phase_voxel.png"
+    _write_minimal_phase_average(path)
+
+    with PhaseAverageVolume(path) as volume:
+        show_phase_voxel_series(
+            volume,
+            x_value=1.0,
+            y_value=2.0,
+            z_value=3.0,
+            min_valid_fraction=0.5,
+            save=output,
+        )
+
+    assert output.exists()

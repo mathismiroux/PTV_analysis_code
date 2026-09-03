@@ -100,33 +100,48 @@ def _phase_bin_indices(phases: np.ndarray, n_phase_bins: int) -> np.ndarray:
 
 
 def _first_harmonic_from_phase_means(
-    coherent: np.ndarray,
+    phase_values: np.ndarray,
     phase_centers: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    cos_phase = np.cos(phase_centers)[:, None, None, None]
-    sin_phase = np.sin(phase_centers)[:, None, None, None]
-    valid = np.isfinite(coherent)
-    valid_count = valid.sum(axis=0)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fit mean + first harmonic to phase-bin means, skipping missing bins."""
 
-    a = np.full(coherent.shape[1:], np.nan, dtype=np.float64)
-    b = np.full(coherent.shape[1:], np.nan, dtype=np.float64)
-    enough = valid_count > 0
-    np.divide(
-        2.0 * np.where(valid, coherent * cos_phase, 0.0).sum(axis=0),
-        valid_count,
-        out=a,
-        where=enough,
+    flat = phase_values.reshape(phase_values.shape[0], -1)
+    design = np.column_stack(
+        [
+            np.ones(phase_centers.shape, dtype=np.float64),
+            np.cos(phase_centers),
+            np.sin(phase_centers),
+        ]
     )
-    np.divide(
-        2.0 * np.where(valid, coherent * sin_phase, 0.0).sum(axis=0),
-        valid_count,
-        out=b,
-        where=enough,
-    )
+    valid = np.isfinite(flat)
+
+    offset = np.full(flat.shape[1], np.nan, dtype=np.float64)
+    a_flat = np.full(flat.shape[1], np.nan, dtype=np.float64)
+    b_flat = np.full(flat.shape[1], np.nan, dtype=np.float64)
+    for mask_tuple in {tuple(mask) for mask in valid.T if mask.sum() >= 3}:
+        mask = np.asarray(mask_tuple, dtype=bool)
+        selected = np.all(valid == mask[:, None], axis=0)
+        if not np.any(selected):
+            continue
+        selected_design = design[mask, :]
+        if np.linalg.matrix_rank(selected_design) < 3:
+            continue
+        coefficients = np.linalg.lstsq(
+            selected_design,
+            flat[mask, :][:, selected],
+            rcond=None,
+        )[0]
+        offset[selected] = coefficients[0]
+        a_flat[selected] = coefficients[1]
+        b_flat[selected] = coefficients[2]
+
+    output_shape = phase_values.shape[1:]
+    offset = offset.reshape(output_shape)
+    a = a_flat.reshape(output_shape)
+    b = b_flat.reshape(output_shape)
     amplitude = np.sqrt(a * a + b * b)
     phase = np.arctan2(-b, a)
-    return a, b, amplitude, phase
-
+    return offset, a, b, amplitude, phase
 
 def _interpolate_along_axis(
     data: np.ndarray,
@@ -393,7 +408,6 @@ class TemporalAverageVolume:
             "speed": speed,
         }
 
-
 class PhaseAverageVolume:
     """Reader for phase-average output files created by this package."""
 
@@ -470,6 +484,105 @@ class PhaseAverageVolume:
             "u_phase_count": self._file["u_phase_count"][:, z_index, y_index, x_index],
             "v_phase_count": self._file["v_phase_count"][:, z_index, y_index, x_index],
             "w_phase_count": self._file["w_phase_count"][:, z_index, y_index, x_index],
+        }
+
+    def read_phase_series_at(
+        self,
+        z_index: int,
+        y_index: int,
+        x_index: int,
+        field: str = "phase_mean",
+    ) -> dict[str, np.ndarray | float | int | str]:
+        z_len, y_len, x_len = self.grid_shape
+        if not 0 <= z_index < z_len:
+            raise IndexError(f"z_index must be in [0, {z_len - 1}]")
+        if not 0 <= y_index < y_len:
+            raise IndexError(f"y_index must be in [0, {y_len - 1}]")
+        if not 0 <= x_index < x_len:
+            raise IndexError(f"x_index must be in [0, {x_len - 1}]")
+        if field not in ("phase_mean", "coherent"):
+            raise ValueError("field must be 'phase_mean' or 'coherent'")
+
+        suffix = "phase_mean" if field == "phase_mean" else "coherent"
+        return {
+            "field": field,
+            "z_index": z_index,
+            "y_index": y_index,
+            "x_index": x_index,
+            "z": float(self._file["z"][z_index]),
+            "y": float(self._file["y"][y_index]),
+            "x": float(self._file["x"][x_index]),
+            "phase": self._file["phase"][:],
+            "phase_degrees": (
+                self._file["phase_degrees"][:]
+                if "phase_degrees" in self._file
+                else np.degrees(self._file["phase"][:])
+            ),
+            "phase_sample_count": self._file["phase_sample_count"][:],
+            "u": self._file[f"u_{suffix}"][:, z_index, y_index, x_index],
+            "v": self._file[f"v_{suffix}"][:, z_index, y_index, x_index],
+            "w": self._file[f"w_{suffix}"][:, z_index, y_index, x_index],
+            "u_count": self._file["u_phase_count"][:, z_index, y_index, x_index],
+            "v_count": self._file["v_phase_count"][:, z_index, y_index, x_index],
+            "w_count": self._file["w_phase_count"][:, z_index, y_index, x_index],
+        }
+
+    def read_harmonic_plane(
+        self,
+        axis: str,
+        index: int,
+        component: str = "u",
+        quantity: str = "amplitude",
+    ) -> dict[str, np.ndarray | float | int | str]:
+        if axis not in ("x", "y", "z"):
+            raise ValueError("axis must be one of 'x', 'y', or 'z'")
+        if component not in ("u", "v", "w"):
+            raise ValueError("component must be one of 'u', 'v', or 'w'")
+        if quantity not in ("amplitude", "phase", "a", "b", "offset"):
+            raise ValueError(
+                "quantity must be one of 'amplitude', 'phase', 'a', 'b', or 'offset'"
+            )
+
+        axis_to_dim = {"z": 0, "y": 1, "x": 2}
+        dim = axis_to_dim[axis]
+        max_index = self.grid_shape[dim] - 1
+        if index < 0:
+            index += self.grid_shape[dim]
+        if not 0 <= index <= max_index:
+            raise IndexError(f"{axis}_index must be in [0, {max_index}]")
+
+        dataset_name = f"{component}_harmonic_{quantity}"
+        if dataset_name not in self._file:
+            raise KeyError(f"Missing expected harmonic dataset: {dataset_name}")
+
+        values = self.coordinate(axis)
+        if axis == "z":
+            horizontal_axis = "x"
+            vertical_axis = "y"
+            data = self._file[dataset_name][index, :, :]
+        elif axis == "y":
+            horizontal_axis = "x"
+            vertical_axis = "z"
+            data = self._file[dataset_name][:, index, :]
+        else:
+            horizontal_axis = "y"
+            vertical_axis = "z"
+            data = self._file[dataset_name][:, :, index]
+
+        return {
+            "axis": axis,
+            "index": index,
+            "value": float(values[index]),
+            f"{axis}_index": index,
+            f"{axis}_value": float(values[index]),
+            "horizontal_axis": horizontal_axis,
+            "vertical_axis": vertical_axis,
+            "horizontal": self.coordinate(horizontal_axis),
+            "vertical": self.coordinate(vertical_axis),
+            "component": component,
+            "quantity": quantity,
+            "dataset": dataset_name,
+            "data": data,
         }
 
     def read_plane(
@@ -941,7 +1054,7 @@ def phase_average_volume(
         )
         coherent[name] = phase_means[name] - temporal_means[name][None, :, :, :]
         harmonic[name] = _first_harmonic_from_phase_means(
-            coherent[name], (np.arange(n_phase_bins) + 0.5) * TWO_PI / n_phase_bins
+            phase_means[name], (np.arange(n_phase_bins) + 0.5) * TWO_PI / n_phase_bins
         )
 
     speed_from_phase_mean = np.sqrt(
@@ -1046,8 +1159,9 @@ def phase_average_volume(
                     compression="gzip",
                     compression_opts=4,
                 )
-                a, b, amplitude, phase = harmonic[name]
+                offset, a, b, amplitude, phase = harmonic[name]
                 for suffix, values in (
+                    ("harmonic_offset", offset),
                     ("harmonic_a", a),
                     ("harmonic_b", b),
                     ("harmonic_amplitude", amplitude),

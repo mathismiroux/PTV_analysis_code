@@ -484,6 +484,19 @@ first-harmonic products `u_harmonic_a`, `u_harmonic_b`,
 When `u_inf` is available, it also stores `wake_deficit_phase` and
 `wake_deficit_coherent`.
 
+Incomplete samples are handled independently at each voxel, phase bin, and
+velocity component. With the default `--invalid-samples nan`, only finite values
+are accumulated into the phase-bin sums and counts; NaNs do not contribute to
+the numerator or denominator. A phase-bin mean is written only when its valid
+count passes `--min-valid-fraction` for that bin. The coherent field is then the
+phase-bin mean minus the valid-sample temporal mean at the same voxel. The
+first-harmonic fit is computed as an explicit least-squares fit to
+`offset + a cos(phase) + b sin(phase)` using the phase-bin means. Bins that are
+NaN are skipped. The stored harmonic amplitude is `sqrt(a^2 + b^2)`, so the
+constant offset/mean does not contribute to the amplitude. The harmonic fit is
+therefore coverage-aware through the valid/NaN phase means, but it is not
+weighted by the number of raw samples inside each valid bin.
+
 To visually inspect the resulting phase-averaged velocity, open an interactive
 plane viewer:
 
@@ -497,6 +510,68 @@ The phase slider and arrow buttons move through the stored phase bins. Use
 `--phase-field phase_mean` to see the phase-averaged velocity itself, or
 `--phase-field coherent` to see the phase-locked fluctuation relative to the
 mean.
+
+To check the phase-locked waveform at one voxel, plot all three components
+against phase:
+
+```powershell
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --phase-voxel --x 4200 --y 0 --z 0 --phase-field phase_mean --min-valid-fraction 0.5
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --phase-voxel --x 4200 --y 0 --z 0 --phase-field coherent --save outputs\phase_voxel.png
+```
+
+The upper panel shows `u`, `v`, and `w` versus phase, closed over one cycle.
+The lower panel shows the valid-sample count in each phase bin together with
+the count required by `--min-valid-fraction`. Rejected bins are omitted from the
+lines and marked with crosses when their stored value is finite. This is a
+quick diagnostic for whether the selected voxel has enough phase coverage to
+support a phase-averaged analysis. The plot reads only the final
+`phase_average.nc` file, so it cannot show convergence versus the number of
+processed cycles; that would require storing partial phase averages during the
+original run or rereading the raw time series.
+
+For true convergence versus the number of motion cycles at one voxel, reread
+the source raw/interpolated time series and accumulate the selected phase-bin
+means cycle by cycle:
+
+```powershell
+python scripts\plot_phase_voxel_convergence.py outputs\surge_st06_x3p5d\phase_average.nc --x 4200 --y 0 --z 0 --phases-deg 0,90,180,270 --min-valid-fraction 0.5 --output outputs\phase_voxel_convergence.png
+python scripts\plot_phase_voxel_convergence.py outputs\surge_st06_x3p5d\phase_average.nc --raw-file path\to\interpolated_or_raw.nc --x 4200 --y 0 --z 0 --field coherent
+```
+
+By default, the script uses the `source_file`, `frequency_hz`, `phase_offset`,
+`n_phase_bins`, `invalid_samples`, and `zero_mask` metadata stored in
+`phase_average.nc`. Pass `--raw-file`, `--frequency-hz`, `--phase-signal`,
+`--invalid-samples`, or `--zero-mask` to override those values. The PNG shows
+four requested phases, using the nearest stored phase-bin center for each one;
+the dashed horizontal lines are the final values stored in `phase_average.nc`.
+A matching CSV is written next to the PNG with the cumulative means and counts
+for each cycle, component, and selected phase bin.
+
+The same `phase_average.nc` file also stores the first-harmonic fit. Plot a
+single harmonic map with:
+
+```powershell
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --harmonic-plane --plane z --plane-value 0 --harmonic-component u --harmonic-quantity amplitude
+python main.py outputs\surge_st06_x3p5d\phase_average.nc --harmonic-plane --plane z --plane-value 0 --harmonic-component u --harmonic-quantity phase
+```
+
+Available harmonic quantities are `amplitude`, `phase`, `a`, `b`, and `offset`.
+The plotted harmonic amplitude is the coherent first-harmonic response after
+the missing-bin handling described above. The phase map is displayed in degrees.
+
+To combine the main quality checks for one voxel in a single figure, run:
+
+```powershell
+python scripts\assess_phase_average_quality.py outputs\surge_st06_x3p5d\phase_average.nc --x 4200 --y 0 --z 0 --min-valid-fraction 0.5 --output outputs\phase_quality.png
+```
+
+The script rereads the source raw/interpolated time series for the selected
+voxel. It plots phase-bin means with standard-error bars, valid-count coverage
+per phase bin, cycle-by-cycle convergence for the first requested phase, and a
+summary panel with accepted phase-bin counts, coherent-RMS to residual-RMS
+ratios, and first-harmonic `R2` values. It also writes a CSV next to the PNG.
+Use `--raw-file`, `--frequency-hz`, or `--phase-signal` if the stored metadata
+does not point to the desired source file or phase definition.
 
 ### Extract A Z Slab
 

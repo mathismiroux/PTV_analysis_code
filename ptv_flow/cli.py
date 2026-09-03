@@ -21,7 +21,9 @@ from ptv_flow.postprocess import (
 from ptv_flow.reader import DEFAULT_FILE, FlowDataset
 from ptv_flow.visualize import (
     animate_z_plane,
+    show_harmonic_plane,
     show_phase_average_plane_gui,
+    show_phase_voxel_series,
     show_temporal_average_plane,
 )
 from ptv_flow.validity import INVALID_SAMPLE_MODES
@@ -270,6 +272,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="interactively view one plane from a phase_average.nc file",
     )
     parser.add_argument(
+        "--phase-voxel",
+        action="store_true",
+        help="plot phase-locked u/v/w curves at one voxel from a phase_average.nc file",
+    )
+    parser.add_argument(
+        "--harmonic-plane",
+        action="store_true",
+        help="plot one harmonic-fit plane from a phase_average.nc file",
+    )
+    parser.add_argument(
         "--x",
         type=float,
         default=0.0,
@@ -470,6 +482,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("phase_mean", "coherent"),
         default="phase_mean",
         help="field to display with --phase-average-plane",
+    )
+    parser.add_argument(
+        "--harmonic-component",
+        choices=("u", "v", "w"),
+        default="u",
+        help="velocity component for --harmonic-plane",
+    )
+    parser.add_argument(
+        "--harmonic-quantity",
+        choices=("amplitude", "phase", "a", "b", "offset"),
+        default="amplitude",
+        help="harmonic-fit quantity for --harmonic-plane",
     )
     parser.add_argument(
         "--output",
@@ -777,6 +801,35 @@ def main() -> None:
                 quantity=args.quantity,
                 field=args.phase_field,
                 quiver_step=args.quiver_step,
+                min_valid_fraction=args.min_valid_fraction,
+            )
+        return
+
+    if args.phase_voxel:
+        with PhaseAverageVolume(args.path) as volume:
+            show_phase_voxel_series(
+                volume,
+                x_value=args.x,
+                y_value=args.y,
+                z_value=args.z,
+                field=args.phase_field,
+                min_valid_fraction=args.min_valid_fraction,
+                save=args.save,
+            )
+        return
+
+    if args.harmonic_plane:
+        plane_value = args.z if args.plane_value is None and args.plane == "z" else args.plane_value
+        if plane_value is None:
+            plane_value = 0.0
+        with PhaseAverageVolume(args.path) as volume:
+            show_harmonic_plane(
+                volume,
+                plane_axis=args.plane,
+                plane_value=plane_value,
+                component=args.harmonic_component,
+                harmonic_quantity=args.harmonic_quantity,
+                save=args.save,
                 min_valid_fraction=args.min_valid_fraction,
             )
         return

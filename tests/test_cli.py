@@ -22,6 +22,8 @@ def test_cli_help_runs():
     assert "--temporal-average" in result.stdout
     assert "--average-plane" in result.stdout
     assert "--phase-average-plane" in result.stdout
+    assert "--phase-voxel" in result.stdout
+    assert "--harmonic-plane" in result.stdout
     assert "--inspect" in result.stdout
     assert "--inspect-phase-average" in result.stdout
     assert "--x" in result.stdout
@@ -41,6 +43,8 @@ def test_cli_help_runs():
     assert "--invalid-samples" in result.stdout
     assert "--quantity" in result.stdout
     assert "--phase-field" in result.stdout
+    assert "--harmonic-component" in result.stdout
+    assert "--harmonic-quantity" in result.stdout
     assert "--plane" in result.stdout
     assert "--plane-value" in result.stdout
     assert "--overwrite" in result.stdout

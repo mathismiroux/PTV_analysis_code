@@ -310,6 +310,165 @@ def _apply_phase_plane_valid_fraction(
     return np.where(accepted, scalar, np.nan)
 
 
+def _phase_count_stack_for_plane(
+    volume: PhaseAverageVolume,
+    plane_axis: str,
+    plane_index: int,
+    component: str,
+) -> np.ndarray:
+    count_name = f"{component}_phase_count"
+    if count_name not in volume._file:
+        raise KeyError(f"Missing expected phase-count dataset: {count_name}")
+    if plane_axis == "z":
+        return volume._file[count_name][:, plane_index, :, :]
+    if plane_axis == "y":
+        return volume._file[count_name][:, :, plane_index, :]
+    if plane_axis == "x":
+        return volume._file[count_name][:, :, :, plane_index]
+    raise ValueError("plane_axis must be one of 'x', 'y', or 'z'")
+
+
+def _apply_harmonic_valid_fraction(
+    volume: PhaseAverageVolume,
+    scalar: np.ndarray,
+    plane_axis: str,
+    plane_index: int,
+    component: str,
+    min_valid_fraction: float,
+) -> tuple[np.ndarray, int]:
+    min_counts = _phase_plane_min_valid_counts(volume, min_valid_fraction)
+    counts = _phase_count_stack_for_plane(
+        volume,
+        plane_axis=plane_axis,
+        plane_index=plane_index,
+        component=component,
+    )
+    accepted = np.all(counts >= min_counts[:, None, None], axis=0)
+    masked = np.where(accepted, scalar, np.nan)
+    return masked, int(np.count_nonzero(accepted))
+
+
+def show_phase_voxel_series(
+    volume: PhaseAverageVolume,
+    x_value: float,
+    y_value: float,
+    z_value: float,
+    field: str = "phase_mean",
+    min_valid_fraction: float = 0.0,
+    save: Path | None = None,
+) -> None:
+    """Plot phase-locked velocity components at the nearest stored voxel."""
+
+    x_index = volume.nearest_index("x", x_value)
+    y_index = volume.nearest_index("y", y_value)
+    z_index = volume.nearest_index("z", z_value)
+    series = volume.read_phase_series_at(
+        z_index=z_index,
+        y_index=y_index,
+        x_index=x_index,
+        field=field,
+    )
+    min_counts = _phase_plane_min_valid_counts(volume, min_valid_fraction)
+    phase_degrees = np.asarray(series["phase_degrees"], dtype=np.float64)
+    phase_closed = np.r_[phase_degrees, phase_degrees[0] + 360.0]
+
+    component_styles = {
+        "u": ("#1f77b4", "o"),
+        "v": ("#d62728", "s"),
+        "w": ("#2ca02c", "^"),
+    }
+    fig, (ax_velocity, ax_counts) = plt.subplots(
+        2,
+        1,
+        figsize=(9.5, 7.0),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.0, 1.2]},
+        constrained_layout=True,
+    )
+
+    accepted_by_component: dict[str, np.ndarray] = {}
+    for component, (color, marker) in component_styles.items():
+        values = np.asarray(series[component], dtype=np.float64)
+        counts = np.asarray(series[f"{component}_count"], dtype=np.uint32)
+        accepted = counts >= min_counts
+        accepted_by_component[component] = accepted
+        plotted = np.where(accepted, values, np.nan)
+        plotted_closed = np.r_[plotted, plotted[0]]
+        ax_velocity.plot(
+            phase_closed,
+            plotted_closed,
+            color=color,
+            marker=marker,
+            linewidth=1.7,
+            label=component,
+        )
+        rejected = ~accepted & np.isfinite(values)
+        if rejected.any():
+            ax_velocity.scatter(
+                phase_degrees[rejected],
+                values[rejected],
+                color=color,
+                marker="x",
+                s=42,
+                alpha=0.9,
+            )
+
+    count_width = 360.0 / max(volume.n_phase_bins, 1) / 4.5
+    offsets = {"u": -count_width, "v": 0.0, "w": count_width}
+    for component, (color, _) in component_styles.items():
+        counts = np.asarray(series[f"{component}_count"], dtype=np.uint32)
+        ax_counts.bar(
+            phase_degrees + offsets[component],
+            counts,
+            width=count_width,
+            color=color,
+            alpha=0.72,
+            label=f"{component} count",
+        )
+    ax_counts.step(
+        phase_closed,
+        np.r_[min_counts, min_counts[0]],
+        where="mid",
+        color="black",
+        linewidth=1.1,
+        label="min count",
+    )
+
+    title_prefix = "Phase-mean" if field == "phase_mean" else "Coherent"
+    ax_velocity.set_title(
+        f"{title_prefix} velocity at "
+        f"x={series['x']:.6g}, y={series['y']:.6g}, z={series['z']:.6g}"
+    )
+    ax_velocity.set_ylabel("velocity")
+    ax_velocity.grid(True, color="0.82", linewidth=0.6)
+    ax_velocity.legend(loc="best", ncol=3)
+    ax_counts.set_xlabel("phase [deg]")
+    ax_counts.set_ylabel("valid samples")
+    ax_counts.set_xlim(float(phase_degrees[0]), float(phase_degrees[0]) + 360.0)
+    ax_counts.grid(True, axis="y", color="0.82", linewidth=0.6)
+    ax_counts.legend(loc="best", ncol=4)
+
+    print(f"Reading phase-average file: {volume.path.resolve()}")
+    print(
+        f"Showing {field} voxel phase series at nearest voxel "
+        f"x={series['x']:.6g} (index {x_index}), "
+        f"y={series['y']:.6g} (index {y_index}), "
+        f"z={series['z']:.6g} (index {z_index})."
+    )
+    if min_valid_fraction > 0.0:
+        summary = ", ".join(
+            f"{component}: {int(mask.sum())}/{mask.size} bins"
+            for component, mask in accepted_by_component.items()
+        )
+        print(f"Accepted bins with min_valid_fraction={min_valid_fraction:g}: {summary}.")
+    if save is not None:
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=200)
+        print(f"Saved phase voxel series to {save}")
+    else:
+        plt.show()
+
+
 def show_phase_average_plane_gui(
     volume: PhaseAverageVolume,
     plane_axis: str = "z",
@@ -431,6 +590,103 @@ def show_phase_average_plane_gui(
         print(f"Display mask: min_valid_fraction={min_valid_fraction:g}.")
     refresh()
     plt.show()
+
+
+def show_harmonic_plane(
+    volume: PhaseAverageVolume,
+    plane_axis: str = "z",
+    plane_value: float = 0.0,
+    component: str = "u",
+    harmonic_quantity: str = "amplitude",
+    save: Path | None = None,
+    min_valid_fraction: float = 0.0,
+) -> None:
+    """Show one harmonic-fit map from a phase-average volume."""
+
+    plane_index = volume.nearest_index(plane_axis, plane_value)
+    plane = volume.read_harmonic_plane(
+        axis=plane_axis,
+        index=plane_index,
+        component=component,
+        quantity=harmonic_quantity,
+    )
+    data = plane["data"]
+    if harmonic_quantity == "phase":
+        scalar = np.degrees(data)
+        colorbar_label = f"{component} harmonic phase [deg]"
+        cmap = "twilight"
+        vmin, vmax = -180.0, 180.0
+    elif harmonic_quantity == "amplitude":
+        scalar = data
+        colorbar_label = f"{component} harmonic amplitude"
+        cmap = "magma"
+        vmin = vmax = None
+    else:
+        scalar = data
+        colorbar_label = f"{component} harmonic {harmonic_quantity}"
+        cmap = "coolwarm"
+        finite = scalar[np.isfinite(scalar)]
+        if finite.size:
+            limit = float(np.nanmax(np.abs(finite)))
+            vmin, vmax = (-limit, limit) if limit > 0.0 else (None, None)
+        else:
+            vmin = vmax = None
+
+    accepted_cells = None
+    if min_valid_fraction > 0.0:
+        scalar, accepted_cells = _apply_harmonic_valid_fraction(
+            volume,
+            scalar,
+            plane_axis=plane_axis,
+            plane_index=plane_index,
+            component=component,
+            min_valid_fraction=min_valid_fraction,
+        )
+
+    fig, ax = plt.subplots(figsize=(9, 7), constrained_layout=True)
+    image = ax.imshow(
+        scalar,
+        extent=(
+            plane["horizontal"].min(),
+            plane["horizontal"].max(),
+            plane["vertical"].min(),
+            plane["vertical"].max(),
+        ),
+        origin="lower",
+        cmap=cmap,
+        interpolation="nearest",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    cbar = fig.colorbar(image, ax=ax)
+    cbar.set_label(colorbar_label)
+    ax.set_xlabel(str(plane["horizontal_axis"]))
+    ax.set_ylabel(str(plane["vertical_axis"]))
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_title(
+        f"{plane['dataset']}, {plane_axis}={plane['value']:.6g} "
+        f"(nearest to {plane_value:.6g})"
+    )
+
+    print(f"Reading phase-average file: {volume.path.resolve()}")
+    print(
+        f"Showing harmonic {harmonic_quantity} for component={component}, "
+        f"{plane_axis}={plane['value']:.6g} "
+        f"({plane_axis}_index={plane['index']}, nearest to requested "
+        f"{plane_axis}={plane_value:g})."
+    )
+    if accepted_cells is not None:
+        print(
+            f"Display mask: min_valid_fraction={min_valid_fraction:g}; "
+            f"accepted {accepted_cells}/{scalar.size} cells with all phase bins "
+            f"valid for {component}."
+        )
+    if save is not None:
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=200)
+        print(f"Saved harmonic plane visualization to {save}")
+    else:
+        plt.show()
 
 
 def show_temporal_average_z_plane(

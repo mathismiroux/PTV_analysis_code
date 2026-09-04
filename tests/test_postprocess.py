@@ -356,9 +356,11 @@ def test_temporal_average_vector_mask_differs_from_component_mask(tmp_path):
         assert vector["u_mean"][0, 0, 0] == 2.0
         assert vector["v_mean"][0, 0, 0] == 2.0
         assert vector["w_mean"][0, 0, 0] == 4.0 / 3.0
-        np.testing.assert_array_equal(vector["u_count"][:], [[[3]]])
-        np.testing.assert_array_equal(vector["v_count"][:], [[[3]]])
-        np.testing.assert_array_equal(vector["w_count"][:], [[[3]]])
+        assert vector.attrs["count_storage"] == "vector"
+        assert "u_count" not in vector
+        assert "v_count" not in vector
+        assert "w_count" not in vector
+        np.testing.assert_array_equal(vector["vector_count"][:], [[[3]]])
 
 
 def test_temporal_average_min_valid_fraction_discards_sparse_values(tmp_path):
@@ -983,6 +985,28 @@ def test_temporal_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
         assert x_plane["vector_horizontal_name"] == "v"
         assert x_plane["vector_vertical_name"] == "w"
         assert x_plane["speed"].shape == (3, 5)
+
+
+def test_temporal_average_volume_reader_uses_vector_count(tiny_flow_path, tmp_path):
+    output = tmp_path / "mean.nc"
+    with FlowDataset(tiny_flow_path) as flow:
+        temporal_average_volume(
+            flow,
+            output=output,
+            chunk_size=4,
+            zero_mask="vector",
+        )
+
+    with h5py.File(output, "r") as h5:
+        assert "vector_count" in h5
+        assert "u_count" not in h5
+    with TemporalAverageVolume(output) as volume:
+        plane = volume.read_plane("z", 1)
+
+        assert plane["vector_count"].shape == (5, 6)
+        np.testing.assert_array_equal(plane["u_count"], plane["vector_count"])
+        np.testing.assert_array_equal(plane["v_count"], plane["vector_count"])
+        np.testing.assert_array_equal(plane["w_count"], plane["vector_count"])
 
 
 def test_phase_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):

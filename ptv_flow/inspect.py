@@ -92,6 +92,21 @@ def step_index(current: int, offset: int, upper: int) -> int:
     return int(np.clip(current + offset, 0, upper))
 
 
+def _average_count_at(
+    average: TemporalAverageVolume,
+    component: str,
+    z_index: int,
+    y_index: int,
+    x_index: int,
+) -> int:
+    count_name = f"{component}_count"
+    if count_name in average._file:
+        return int(average._file[count_name][z_index, y_index, x_index])
+    if "vector_count" in average._file:
+        return int(average._file["vector_count"][z_index, y_index, x_index])
+    return -1
+
+
 def component_mean_ignoring_zero(
     series: np.ndarray, min_valid_count: int = 1, invalid_samples: str = "nan"
 ) -> ComponentMean:
@@ -458,16 +473,22 @@ def validate_interpolated_compatible(
                 f"raw={flow.path}, interpolated={interpolated.path}"
             )
 
-    missing_masks = [
-        f"{name}_filled_mask"
-        for name in ("u", "v", "w")
-        if f"{name}_filled_mask" not in interpolated._file
-    ]
-    if missing_masks:
+    has_shared_mask = "filled_mask" in interpolated._file
+    has_component_masks = all(
+        f"{name}_filled_mask" in interpolated._file for name in ("u", "v", "w")
+    )
+    if not has_shared_mask and not has_component_masks:
         raise ValueError(
-            "Interpolated file is missing filled-mask dataset(s): "
-            f"{', '.join(missing_masks)}"
+            "Interpolated file is missing filled-mask datasets. Expected either "
+            "'filled_mask' or 'u_filled_mask', 'v_filled_mask', and 'w_filled_mask'."
         )
+
+
+def _filled_mask_dataset(interpolated: FlowDataset, component: str):
+    name = f"{component}_filled_mask"
+    if name in interpolated._file:
+        return interpolated._file[name]
+    return interpolated._file["filled_mask"]
 
 
 def _interpolated_filled_plane(
@@ -476,7 +497,7 @@ def _interpolated_filled_plane(
     z_index: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     masks = tuple(
-        interpolated._file[f"{name}_filled_mask"][time_index, z_index, :, :].astype(bool)
+        _filled_mask_dataset(interpolated, name)[time_index, z_index, :, :].astype(bool)
         for name in ("u", "v", "w")
     )
     any_filled = np.logical_or.reduce(masks)
@@ -533,75 +554,48 @@ def inspect_cell(
             )
         )
         filled_u = bool(
-            interpolated._file["u_filled_mask"][time_index, z_index, y_index, x_index]
+            _filled_mask_dataset(interpolated, "u")[time_index, z_index, y_index, x_index]
         )
         filled_v = bool(
-            interpolated._file["v_filled_mask"][time_index, z_index, y_index, x_index]
+            _filled_mask_dataset(interpolated, "v")[time_index, z_index, y_index, x_index]
         )
         filled_w = bool(
-            interpolated._file["w_filled_mask"][time_index, z_index, y_index, x_index]
+            _filled_mask_dataset(interpolated, "w")[time_index, z_index, y_index, x_index]
         )
 
     average_u = None
     average_v = None
     average_w = None
     if average is not None:
+        u_count = _average_count_at(average, "u", z_index, y_index, x_index)
+        v_count = _average_count_at(average, "v", z_index, y_index, x_index)
+        w_count = _average_count_at(average, "w", z_index, y_index, x_index)
         average_u = ComponentMean(
             mean=(
                 float(average._file["u_mean"][z_index, y_index, x_index])
-                if "u_count" not in average._file
-                or int(average._file["u_count"][z_index, y_index, x_index])
-                >= min_valid_count
+                if u_count < 0 or u_count >= min_valid_count
                 else float("nan")
             ),
-            count=(
-                int(average._file["u_count"][z_index, y_index, x_index])
-                if "u_count" in average._file
-                else -1
-            ),
-            accepted=(
-                "u_count" not in average._file
-                or int(average._file["u_count"][z_index, y_index, x_index])
-                >= min_valid_count
-            ),
+            count=u_count,
+            accepted=u_count < 0 or u_count >= min_valid_count,
         )
         average_v = ComponentMean(
             mean=(
                 float(average._file["v_mean"][z_index, y_index, x_index])
-                if "v_count" not in average._file
-                or int(average._file["v_count"][z_index, y_index, x_index])
-                >= min_valid_count
+                if v_count < 0 or v_count >= min_valid_count
                 else float("nan")
             ),
-            count=(
-                int(average._file["v_count"][z_index, y_index, x_index])
-                if "v_count" in average._file
-                else -1
-            ),
-            accepted=(
-                "v_count" not in average._file
-                or int(average._file["v_count"][z_index, y_index, x_index])
-                >= min_valid_count
-            ),
+            count=v_count,
+            accepted=v_count < 0 or v_count >= min_valid_count,
         )
         average_w = ComponentMean(
             mean=(
                 float(average._file["w_mean"][z_index, y_index, x_index])
-                if "w_count" not in average._file
-                or int(average._file["w_count"][z_index, y_index, x_index])
-                >= min_valid_count
+                if w_count < 0 or w_count >= min_valid_count
                 else float("nan")
             ),
-            count=(
-                int(average._file["w_count"][z_index, y_index, x_index])
-                if "w_count" in average._file
-                else -1
-            ),
-            accepted=(
-                "w_count" not in average._file
-                or int(average._file["w_count"][z_index, y_index, x_index])
-                >= min_valid_count
-            ),
+            count=w_count,
+            accepted=w_count < 0 or w_count >= min_valid_count,
         )
 
     phase_coverage = None

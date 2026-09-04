@@ -19,6 +19,7 @@ from ptv_flow.validity import (
 
 REYNOLDS_STRESS_COMPONENTS = ("uu", "uv", "uw", "vv", "vw", "ww")
 INTERPOLATION_AXES = ("t", "z", "y", "x")
+INTERPOLATION_BLOCK_COLUMNS = 100_000
 _AXIS_TO_DIM = {"t": 0, "z": 1, "y": 2, "x": 3}
 TWO_PI = 2.0 * np.pi
 
@@ -150,56 +151,69 @@ def _interpolate_along_axis(
     eligible: np.ndarray,
     max_index_gap: int | None = None,
     max_bracket_span: int | None = None,
+    block_columns: int = INTERPOLATION_BLOCK_COLUMNS,
 ) -> np.ndarray:
     moved = np.moveaxis(data, axis, 0)
     moved_eligible = np.moveaxis(eligible, axis, 0)
     flat = moved.reshape(moved.shape[0], -1)
     flat_eligible = moved_eligible.reshape(moved_eligible.shape[0], -1)
-    valid = np.isfinite(flat)
-    candidate = flat_eligible & ~valid
-    if not np.any(candidate):
-        return data
+    if block_columns <= 0:
+        raise ValueError("block_columns must be positive")
 
     axis_indices = np.arange(flat.shape[0])[:, None]
-    left_indices = np.where(valid, axis_indices, -1)
-    left_indices = np.maximum.accumulate(left_indices, axis=0)
-    right_indices = np.where(valid, axis_indices, flat.shape[0])
-    right_indices = np.minimum.accumulate(right_indices[::-1, :], axis=0)[::-1, :]
-    bracketed = (
-        candidate
-        & (left_indices >= 0)
-        & (right_indices < flat.shape[0])
-        & (left_indices != right_indices)
-    )
-    if max_index_gap is not None:
-        bracketed &= (axis_indices - left_indices <= max_index_gap) & (
-            right_indices - axis_indices <= max_index_gap
-        )
-    if max_bracket_span is not None:
-        bracketed &= right_indices - left_indices <= max_bracket_span
-    if not np.any(bracketed):
-        return data
-
     filled = flat.copy()
-    fill_rows, fill_columns = np.nonzero(bracketed)
-    left = left_indices[fill_rows, fill_columns]
-    right = right_indices[fill_rows, fill_columns]
-    left_coordinates = coordinates[left]
-    right_coordinates = coordinates[right]
-    coordinate_span = right_coordinates - left_coordinates
-    nonzero_span = coordinate_span != 0.0
-    fill_rows = fill_rows[nonzero_span]
-    fill_columns = fill_columns[nonzero_span]
-    left = left[nonzero_span]
-    right = right[nonzero_span]
-    left_coordinates = left_coordinates[nonzero_span]
-    coordinate_span = coordinate_span[nonzero_span]
-    fractions = (coordinates[fill_rows] - left_coordinates) / coordinate_span
-    left_values = flat[left, fill_columns]
-    right_values = flat[right, fill_columns]
-    filled[fill_rows, fill_columns] = left_values + (
-        right_values - left_values
-    ) * fractions
+    filled_any = False
+    for column_start in range(0, flat.shape[1], block_columns):
+        column_stop = min(column_start + block_columns, flat.shape[1])
+        flat_block = flat[:, column_start:column_stop]
+        eligible_block = flat_eligible[:, column_start:column_stop]
+        valid = np.isfinite(flat_block)
+        candidate = eligible_block & ~valid
+        if not np.any(candidate):
+            continue
+
+        left_indices = np.where(valid, axis_indices, -1)
+        left_indices = np.maximum.accumulate(left_indices, axis=0)
+        right_indices = np.where(valid, axis_indices, flat.shape[0])
+        right_indices = np.minimum.accumulate(right_indices[::-1, :], axis=0)[::-1, :]
+        bracketed = (
+            candidate
+            & (left_indices >= 0)
+            & (right_indices < flat.shape[0])
+            & (left_indices != right_indices)
+        )
+        if max_index_gap is not None:
+            bracketed &= (axis_indices - left_indices <= max_index_gap) & (
+                right_indices - axis_indices <= max_index_gap
+            )
+        if max_bracket_span is not None:
+            bracketed &= right_indices - left_indices <= max_bracket_span
+        if not np.any(bracketed):
+            continue
+
+        fill_rows, fill_columns = np.nonzero(bracketed)
+        left = left_indices[fill_rows, fill_columns]
+        right = right_indices[fill_rows, fill_columns]
+        left_coordinates = coordinates[left]
+        right_coordinates = coordinates[right]
+        coordinate_span = right_coordinates - left_coordinates
+        nonzero_span = coordinate_span != 0.0
+        fill_rows = fill_rows[nonzero_span]
+        fill_columns = fill_columns[nonzero_span]
+        left = left[nonzero_span]
+        right = right[nonzero_span]
+        left_coordinates = left_coordinates[nonzero_span]
+        coordinate_span = coordinate_span[nonzero_span]
+        fractions = (coordinates[fill_rows] - left_coordinates) / coordinate_span
+        left_values = flat_block[left, fill_columns]
+        right_values = flat_block[right, fill_columns]
+        filled_block = filled[:, column_start:column_stop]
+        filled_block[fill_rows, fill_columns] = left_values + (
+            right_values - left_values
+        ) * fractions
+        filled_any = True
+    if not filled_any:
+        return data
     return np.moveaxis(filled.reshape(moved.shape), 0, axis)
 
 
@@ -268,6 +282,21 @@ def _interpolate_component_result(
         int(np.count_nonzero(filled_mask)),
         int(np.count_nonzero(remaining_mask)),
     )
+
+
+def _shared_filled_mask_from_flow(flow: FlowDataset) -> np.ndarray | None:
+    if "filled_mask" in flow._file:
+        return flow._file["filled_mask"][:].astype(bool)
+
+    mask_names = [f"{name}_filled_mask" for name in VELOCITY_COMPONENTS]
+    if not all(name in flow._file for name in mask_names):
+        return None
+
+    shared_mask = flow._file[mask_names[0]][:].astype(bool)
+    for mask_name in mask_names[1:]:
+        if not np.array_equal(shared_mask, flow._file[mask_name][:].astype(bool)):
+            return None
+    return shared_mask
 
 
 class TemporalAverageVolume:
@@ -342,9 +371,14 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
-            u_count = self._file["u_count"][index, :, :] if "u_count" in self._file else None
-            v_count = self._file["v_count"][index, :, :] if "v_count" in self._file else None
-            w_count = self._file["w_count"][index, :, :] if "w_count" in self._file else None
+            vector_count = (
+                self._file["vector_count"][index, :, :]
+                if "vector_count" in self._file
+                else None
+            )
+            u_count = self._file["u_count"][index, :, :] if "u_count" in self._file else vector_count
+            v_count = self._file["v_count"][index, :, :] if "v_count" in self._file else vector_count
+            w_count = self._file["w_count"][index, :, :] if "w_count" in self._file else vector_count
         elif axis == "y":
             horizontal_axis = "x"
             vertical_axis = "z"
@@ -358,9 +392,14 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
-            u_count = self._file["u_count"][:, index, :] if "u_count" in self._file else None
-            v_count = self._file["v_count"][:, index, :] if "v_count" in self._file else None
-            w_count = self._file["w_count"][:, index, :] if "w_count" in self._file else None
+            vector_count = (
+                self._file["vector_count"][:, index, :]
+                if "vector_count" in self._file
+                else None
+            )
+            u_count = self._file["u_count"][:, index, :] if "u_count" in self._file else vector_count
+            v_count = self._file["v_count"][:, index, :] if "v_count" in self._file else vector_count
+            w_count = self._file["w_count"][:, index, :] if "w_count" in self._file else vector_count
         else:
             horizontal_axis = "y"
             vertical_axis = "z"
@@ -374,9 +413,14 @@ class TemporalAverageVolume:
                 if "speed_from_mean" in self._file
                 else np.sqrt(u * u + v * v + w * w)
             )
-            u_count = self._file["u_count"][:, :, index] if "u_count" in self._file else None
-            v_count = self._file["v_count"][:, :, index] if "v_count" in self._file else None
-            w_count = self._file["w_count"][:, :, index] if "w_count" in self._file else None
+            vector_count = (
+                self._file["vector_count"][:, :, index]
+                if "vector_count" in self._file
+                else None
+            )
+            u_count = self._file["u_count"][:, :, index] if "u_count" in self._file else vector_count
+            v_count = self._file["v_count"][:, :, index] if "v_count" in self._file else vector_count
+            w_count = self._file["w_count"][:, :, index] if "w_count" in self._file else vector_count
 
         vector_horizontal = {"u": u, "v": v, "w": w}[vector_horizontal_name]
         vector_vertical = {"u": u, "v": v, "w": w}[vector_vertical_name]
@@ -405,6 +449,7 @@ class TemporalAverageVolume:
             "u_count": u_count,
             "v_count": v_count,
             "w_count": w_count,
+            "vector_count": vector_count,
             "speed": speed,
         }
 
@@ -702,6 +747,7 @@ def temporal_average_volume(
     u_inf: float | None = None,
     metadata: Mapping[str, str | float] | None = None,
     invalid_samples: str = "nan",
+    store_counts: bool = True,
 ) -> Path:
     """Compute temporal mean velocity fields while excluding invalid samples.
 
@@ -710,8 +756,8 @@ def temporal_average_volume(
     flow:
         Open velocity dataset.
     output:
-        HDF5/NetCDF-style output file containing coordinates, means, counts,
-        and speed magnitude computed from the mean vector.
+        HDF5/NetCDF-style output file containing coordinates, means, and speed
+        magnitude computed from the mean vector. Counts are included by default.
     chunk_size:
         Number of time steps read per chunk.
     zero_mask:
@@ -729,6 +775,10 @@ def temporal_average_volume(
     invalid_samples:
         Which raw samples are excluded: ``zero``, ``nan``, ``zero-or-nan``,
         or ``none``.
+    store_counts:
+        Store valid-sample counts. For ``zero_mask="vector"``, one shared
+        ``vector_count`` dataset is stored. For ``zero_mask="component"``,
+        separate ``u_count``, ``v_count``, and ``w_count`` datasets are stored.
     """
 
     if chunk_size <= 0:
@@ -796,6 +846,7 @@ def temporal_average_volume(
     speed_from_mean = np.sqrt(
         means["u"] * means["u"] + means["v"] * means["v"] + means["w"] * means["w"]
     )
+    shared_filled_mask = _shared_filled_mask_from_flow(flow)
     wake_deficit = None
     wake_mask_u09 = None
     u_over_u_inf = None
@@ -824,6 +875,13 @@ def temporal_average_volume(
             out.attrs["chunk_size"] = chunk_size
             out.attrs["min_valid_fraction"] = min_valid_fraction
             out.attrs["min_valid_count"] = min_valid_count
+            out.attrs["stores_counts"] = store_counts
+            out.attrs["count_storage"] = (
+                "vector" if store_counts and zero_mask == "vector"
+                else "component" if store_counts
+                else "none"
+            )
+            out.attrs["stores_filled_mask"] = shared_filled_mask is not None
             out.attrs["input_shape_time_z_y_x"] = flow.shape
             if u_inf is not None:
                 out.attrs["u_inf"] = float(u_inf)
@@ -837,6 +895,9 @@ def temporal_average_volume(
             provenance.attrs["chunk_size"] = chunk_size
             provenance.attrs["min_valid_fraction"] = min_valid_fraction
             provenance.attrs["min_valid_count"] = min_valid_count
+            provenance.attrs["stores_counts"] = store_counts
+            provenance.attrs["count_storage"] = out.attrs["count_storage"]
+            provenance.attrs["stores_filled_mask"] = shared_filled_mask is not None
             if metadata is not None:
                 for key, value in metadata.items():
                     provenance.attrs[key] = value
@@ -848,6 +909,15 @@ def temporal_average_volume(
                     continue
                 out.create_dataset(name, data=flow.coordinate(name))
 
+            if shared_filled_mask is not None:
+                out.create_dataset("t", data=flow.coordinate("t"))
+                out.create_dataset(
+                    "filled_mask",
+                    data=shared_filled_mask,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+
             for name in VELOCITY_COMPONENTS:
                 out.create_dataset(
                     f"{name}_mean",
@@ -855,9 +925,17 @@ def temporal_average_volume(
                     compression="gzip",
                     compression_opts=4,
                 )
+                if store_counts and zero_mask == "component":
+                    out.create_dataset(
+                        f"{name}_count",
+                        data=counts[name],
+                        compression="gzip",
+                        compression_opts=4,
+                    )
+            if store_counts and zero_mask == "vector":
                 out.create_dataset(
-                    f"{name}_count",
-                    data=counts[name],
+                    "vector_count",
+                    data=counts["u"],
                     compression="gzip",
                     compression_opts=4,
                 )
@@ -1251,13 +1329,22 @@ def apply_valid_fraction_to_average(
                 src.copy(name, out)
 
             means = {}
+            shared_vector_count = src["vector_count"][:] if "vector_count" in src else None
             for name in VELOCITY_COMPONENTS:
                 count_name = f"{name}_count"
                 mean_name = f"{name}_mean"
-                if count_name not in src or mean_name not in src:
-                    raise KeyError(f"Missing {mean_name!r} or {count_name!r}")
+                if mean_name not in src:
+                    raise KeyError(f"Missing {mean_name!r}")
+                if count_name not in src and shared_vector_count is None:
+                    raise KeyError(
+                        f"Missing {count_name!r} or shared 'vector_count'"
+                    )
 
-                counts = src[count_name][:]
+                counts = (
+                    src[count_name][:]
+                    if count_name in src
+                    else shared_vector_count
+                )
                 mean = src[mean_name][:].astype(np.float64, copy=True)
                 mean[counts < min_valid_count] = np.nan
                 means[name] = mean
@@ -1268,7 +1355,10 @@ def apply_valid_fraction_to_average(
                     compression="gzip",
                     compression_opts=4,
                 )
-                src.copy(count_name, out)
+                if count_name in src:
+                    src.copy(count_name, out)
+            if "vector_count" in src:
+                src.copy("vector_count", out)
 
             speed_from_mean = np.sqrt(
                 means["u"] * means["u"]
@@ -1448,6 +1538,7 @@ def spatio_temporal_interpolate_velocity(
     overwrite: bool = False,
     metadata: Mapping[str, str | float] | None = None,
     invalid_samples: str = "nan",
+    store_component_filled_masks: bool = True,
 ) -> Path:
     """Fill holes in raw velocity fields with sequential linear interpolation.
 
@@ -1515,6 +1606,9 @@ def spatio_temporal_interpolate_velocity(
             out.attrs["interpolation_workers"] = workers
             out.attrs["zero_mask"] = zero_mask
             out.attrs["invalid_samples"] = invalid_samples
+            out.attrs["filled_mask_storage"] = (
+                "component" if store_component_filled_masks else "shared"
+            )
             out.attrs["input_shape_time_z_y_x"] = flow.shape
 
             provenance = out.create_group("provenance")
@@ -1532,6 +1626,7 @@ def spatio_temporal_interpolate_velocity(
             provenance.attrs["interpolation_workers"] = workers
             provenance.attrs["zero_mask"] = zero_mask
             provenance.attrs["invalid_samples"] = invalid_samples
+            provenance.attrs["filled_mask_storage"] = out.attrs["filled_mask_storage"]
 
             for name in COORDINATES:
                 out.create_dataset(name, data=flow.coordinate(name))
@@ -1601,21 +1696,15 @@ def spatio_temporal_interpolate_velocity(
                         )
                     )
 
-            for name, data, filled_mask, before_missing, filled_count, remaining_count in (
-                component_results
-            ):
+            component_filled_masks = {}
+            for name, data, filled_mask, before_missing, filled_count, remaining_count in component_results:
                 fill_counts[name] = int(np.count_nonzero(filled_mask))
                 remaining_counts[name] = remaining_count
+                component_filled_masks[name] = filled_mask
 
                 out.create_dataset(
                     name,
                     data=data,
-                    compression="gzip",
-                    compression_opts=4,
-                )
-                out.create_dataset(
-                    f"{name}_filled_mask",
-                    data=filled_mask,
                     compression="gzip",
                     compression_opts=4,
                 )
@@ -1624,6 +1713,31 @@ def spatio_temporal_interpolate_velocity(
                     f"filled={filled_count}, "
                     f"remaining={remaining_count}",
                     flush=True,
+                )
+
+            if store_component_filled_masks:
+                for name in VELOCITY_COMPONENTS:
+                    out.create_dataset(
+                        f"{name}_filled_mask",
+                        data=component_filled_masks[name],
+                        compression="gzip",
+                        compression_opts=4,
+                    )
+            else:
+                shared_mask = component_filled_masks["u"]
+                masks_match = all(
+                    np.array_equal(shared_mask, component_filled_masks[name])
+                    for name in VELOCITY_COMPONENTS[1:]
+                )
+                if not masks_match:
+                    raise ValueError(
+                        "Cannot store one shared filled mask because component masks differ."
+                    )
+                out.create_dataset(
+                    "filled_mask",
+                    data=shared_mask,
+                    compression="gzip",
+                    compression_opts=4,
                 )
 
             out.attrs["u_filled_count"] = fill_counts["u"]

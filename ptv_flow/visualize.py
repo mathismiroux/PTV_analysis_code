@@ -129,6 +129,35 @@ def _apply_plane_valid_fraction(
     return scalar
 
 
+def _plane_valid_counts(
+    plane: dict[str, np.ndarray | float | int],
+    quantity: str,
+) -> list[np.ndarray]:
+    if quantity == "speed":
+        counts = [plane.get(f"{name}_count") for name in ("u", "v", "w")]
+        if not all(isinstance(count, np.ndarray) for count in counts):
+            return []
+        return [count for count in counts if isinstance(count, np.ndarray)]
+
+    count = plane.get(f"{quantity}_count")
+    return [count] if isinstance(count, np.ndarray) else []
+
+
+def _plane_mask_summary(
+    plane: dict[str, np.ndarray | float | int],
+    quantity: str,
+    min_valid_count: int,
+) -> tuple[int, int] | None:
+    counts = _plane_valid_counts(plane, quantity)
+    if not counts:
+        return None
+
+    accepted = np.ones(counts[0].shape, dtype=bool)
+    for count in counts:
+        accepted &= count >= min_valid_count
+    return int(np.count_nonzero(accepted)), int(accepted.size)
+
+
 def animate_z_plane(
     flow: FlowDataset,
     z_value: float = 0.0,
@@ -224,19 +253,86 @@ def show_temporal_average_plane(
 ) -> None:
     """Show one x, y, or z plane from a temporal-average volume."""
 
+    if quiver_step <= 0:
+        raise ValueError("quiver_step must be positive")
+    axis_to_dim = {"z": 0, "y": 1, "x": 2}
+    if plane_axis not in axis_to_dim:
+        raise ValueError("plane_axis must be one of 'x', 'y', or 'z'")
+
     plane_index = volume.nearest_index(plane_axis, plane_value)
-    plane = volume.read_plane(plane_axis, plane_index)
-    scalar, colorbar_label, cmap = _temporal_average_quantity(plane, quantity)
-    min_valid_count = _min_valid_count(volume, min_valid_fraction)
-    scalar = _apply_plane_valid_fraction(
-        plane,
-        scalar,
-        quantity=quantity,
-        min_valid_count=min_valid_count,
+    max_plane_index = volume.grid_shape[axis_to_dim[plane_axis]] - 1
+
+    def read_masked_plane(
+        index: int,
+        fraction: float,
+    ) -> tuple[
+        dict[str, np.ndarray | float | int | str],
+        np.ndarray,
+        str,
+        str,
+        int,
+        tuple[int, int] | None,
+    ]:
+        plane = volume.read_plane(plane_axis, index)
+        scalar, colorbar_label, cmap = _temporal_average_quantity(plane, quantity)
+        counts = _plane_valid_counts(plane, quantity)
+        min_valid_count = _min_valid_count(volume, fraction) if counts else 1
+        scalar = _apply_plane_valid_fraction(
+            plane,
+            scalar,
+            quantity=quantity,
+            min_valid_count=min_valid_count,
+        )
+        mask_summary = _plane_mask_summary(plane, quantity, min_valid_count)
+        return plane, scalar, colorbar_label, cmap, min_valid_count, mask_summary
+
+    def apply_color_limits(scalar: np.ndarray) -> None:
+        finite = scalar[np.isfinite(scalar)]
+        if not finite.size:
+            return
+        if quantity in {"u", "v", "w"}:
+            limit = float(np.nanmax(np.abs(finite)))
+            if limit > 0:
+                image.set_clim(-limit, limit)
+        else:
+            image.set_clim(float(np.nanmin(finite)), float(np.nanmax(finite)))
+
+    def title_text(
+        plane: dict[str, np.ndarray | float | int | str],
+        fraction: float,
+        min_valid_count: int,
+        mask_summary: tuple[int, int] | None,
+    ) -> str:
+        title = (
+            f"Temporal mean {quantity}, {plane_axis}={plane['value']:.6g} "
+            f"(index {plane['index']}/{max_plane_index})"
+        )
+        if fraction > 0.0:
+            if mask_summary is None:
+                title += ", valid-fraction mask unavailable: no count fields"
+            else:
+                accepted, total = mask_summary
+                title += (
+                    f", valid fraction >= {fraction:.2g} "
+                    f"(count >= {min_valid_count}, visible {accepted}/{total})"
+                )
+        return title
+
+    plane, scalar, colorbar_label, cmap, min_valid_count, mask_summary = read_masked_plane(
+        plane_index,
+        min_valid_fraction,
     )
 
-    fig, ax = plt.subplots(figsize=(9, 7), constrained_layout=True)
-    image, _, _ = _draw_xy_vector_plane(
+    use_interactive_controls = save is None
+    use_plane_slider = use_interactive_controls and max_plane_index > 0
+    fig, ax = plt.subplots(
+        figsize=(9, 7),
+        constrained_layout=not use_interactive_controls,
+    )
+    if use_interactive_controls:
+        fig.subplots_adjust(bottom=0.22)
+
+    image, quiver, q_slice = _draw_xy_vector_plane(
         ax=ax,
         horizontal=plane["horizontal"],
         vertical=plane["vertical"],
@@ -250,15 +346,9 @@ def show_temporal_average_plane(
     )
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(colorbar_label)
-    if quantity in {"u", "v", "w"}:
-        finite = scalar[np.isfinite(scalar)]
-        if finite.size:
-            limit = float(np.nanmax(np.abs(finite)))
-            if limit > 0:
-                image.set_clim(-limit, limit)
-    ax.set_title(
-        f"Temporal mean {quantity}, {plane_axis}={plane['value']:.6g} "
-        f"(nearest to {plane_value:.6g})"
+    apply_color_limits(scalar)
+    title = ax.set_title(
+        title_text(plane, min_valid_fraction, min_valid_count, mask_summary)
     )
 
     print(f"Reading postprocessed file: {volume.path.resolve()}")
@@ -268,16 +358,102 @@ def show_temporal_average_plane(
         f"nearest to requested {plane_axis}={plane_value:g})."
     )
     if min_valid_fraction > 0.0:
-        print(
-            f"Display mask: min_valid_fraction={min_valid_fraction:g} "
-            f"(min_count={min_valid_count})."
-        )
+        if mask_summary is None:
+            print(
+                "Display mask unavailable: this file does not contain the "
+                f"count dataset(s) needed for quantity={quantity}."
+            )
+        else:
+            accepted, total = mask_summary
+            print(
+                f"Display mask: min_valid_fraction={min_valid_fraction:g} "
+                f"(min_count={min_valid_count}, visible={accepted}/{total})."
+            )
 
     if save is not None:
         save.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save, dpi=200)
         print(f"Saved plane visualization to {save}")
     else:
+        controls: list[object] = []
+        plane_slider: Slider | None = None
+        fraction_slider = None
+        if use_interactive_controls:
+            button_y = 0.11
+            fraction_slider_y = 0.055
+            if use_plane_slider:
+                previous_ax = fig.add_axes((0.08, button_y, 0.06, 0.035))
+                next_ax = fig.add_axes((0.87, button_y, 0.06, 0.035))
+                plane_slider_ax = fig.add_axes((0.18, button_y, 0.67, 0.03))
+                previous_button = Button(previous_ax, "<")
+                next_button = Button(next_ax, ">")
+                plane_slider = Slider(
+                    ax=plane_slider_ax,
+                    label=f"{plane_axis} index",
+                    valmin=0,
+                    valmax=max_plane_index,
+                    valinit=plane_index,
+                    valstep=1,
+                )
+                controls.extend([previous_button, next_button])
+            fraction_slider = Slider(
+                ax=fig.add_axes((0.18, fraction_slider_y, 0.67, 0.03)),
+                label="min valid fraction",
+                valmin=0.0,
+                valmax=1.0,
+                valinit=min_valid_fraction,
+                valstep=0.01,
+            )
+            if plane_slider is not None:
+                controls.append(plane_slider)
+            controls.append(fraction_slider)
+
+            def redraw(_value: float | None = None) -> None:
+                assert fraction_slider is not None
+                current_plane_index = (
+                    int(plane_slider.val) if plane_slider is not None else plane_index
+                )
+                plane, scalar, _, _, min_valid_count, mask_summary = read_masked_plane(
+                    current_plane_index,
+                    float(fraction_slider.val),
+                )
+                image.set_data(scalar)
+                quiver.set_UVC(
+                    plane["vector_horizontal"][q_slice],
+                    plane["vector_vertical"][q_slice],
+                )
+                apply_color_limits(scalar)
+                title.set_text(
+                    title_text(
+                        plane,
+                        float(fraction_slider.val),
+                        min_valid_count,
+                        mask_summary,
+                    )
+                )
+                fig.canvas.draw_idle()
+
+            def step_plane(delta: int) -> None:
+                if plane_slider is None:
+                    return
+                next_index = int(np.clip(plane_slider.val + delta, 0, max_plane_index))
+                if next_index != int(plane_slider.val):
+                    plane_slider.set_val(next_index)
+
+            def on_key(event) -> None:
+                if event.key in ("right", "up"):
+                    step_plane(1)
+                elif event.key in ("left", "down"):
+                    step_plane(-1)
+
+            if plane_slider is not None:
+                plane_slider.on_changed(redraw)
+                previous_button.on_clicked(lambda _event: step_plane(-1))
+                next_button.on_clicked(lambda _event: step_plane(1))
+            fraction_slider.on_changed(redraw)
+            fig.canvas.mpl_connect("key_press_event", on_key)
+            fig._ptv_flow_controls = controls
+
         plt.show()
 
 

@@ -354,49 +354,85 @@ a `b128` raw file with a `b96` temporal average.
 
 ### Prepare Mean Wake Products For Figures
 
-Before plotting paper figures, create reusable 3D mean wake files for every raw
-velocity NetCDF file in a folder. This keeps expensive averaging separate from
+Before plotting paper figures, create reusable 3D mean wake files from the
+interpolated velocity outputs. This keeps expensive averaging separate from
 plotting:
 
 ```powershell
-python scripts\prepare_mean_wake_products.py "D:\my_case_exports" --output-name mean_wake_figure1_dryrun --dry-run
-python scripts\prepare_mean_wake_products.py "D:\my_case_exports" --output-name mean_wake_figure1_001 --invalid-samples zero-or-nan --min-valid-fraction 0.8 --chunk-size 50
+python scripts\prepare_mean_wake_products.py "D:\outputs\interpolation_x5_t2_t-x-y-z_N10" --output-root "D:\outputs\postprocessed" --dry-run
+python scripts\prepare_mean_wake_products.py "D:\outputs\interpolation_x5_t2_t-x-y-z_N10" --output-root "D:\outputs\postprocessed"
 ```
 
-You must provide either `--output-name` or `--output-root`. The output folder
-must not already exist; this analysis refuses to write into an existing folder,
-including with `--overwrite`. Choose a new run name for every processing
-attempt.
+By default this processes interpolated files matching
+`*\interpolated_velocity.nc`. The case name comes from the parent folder, so
+`interpolation_x5_t2_t-x-y-z_N10\Static_case_a\interpolated_velocity.nc`
+writes to `postprocessed\Static_case_a\mean.nc`.
 
-With `--output-name`, outputs are written next to the input folder:
+Use one shared postprocessed output root for all products from the same case:
 
 ```text
 D:\
-  my_case_exports\
-    case_a.nc
-    case_b.nc
   outputs\
-    mean_wake_figure1\
-      case_a\mean.nc
-      case_b\mean.nc
-      manifest.csv
-      manifest.json
+    interpolation_x5_t2_t-x-y-z_N10\
+      Static_case_a\interpolated_velocity.nc
+      SurgeLF_case_b\interpolated_velocity.nc
+    postprocessed\
+      mean_wake_manifest.csv
+      mean_wake_manifest.json
+      Static_case_a\
+        mean.nc
+      SurgeLF_case_b\
+        mean.nc
+        phase_average.nc
 ```
 
-Each `mean.nc` contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
-`speed_from_mean`, `abs_U`, `u_count`, `v_count`, `w_count`, `u_over_u_inf`,
-`wake_deficit`, and `wake_mask_u09` when `--u-inf` is provided. File attributes
-and the manifest record the source file, command line, invalid-sample policy,
-zero-mask mode, chunk size, minimum valid fraction, and overwrite setting.
+Dry runs write separate files and do not block the real run:
+
+```text
+postprocessed\
+  mean_wake_dry_run_manifest.csv
+  mean_wake_dry_run_manifest.json
+```
+
+You must provide either `--output-name` or `--output-root`. With
+`--output-root`, the root can already exist so phase averages and mean products
+can share the same case folders. The script has no `--overwrite` option; it
+refuses existing `mean.nc` files and refuses to replace existing mean-wake
+manifest files.
+
+With `--output-name`, a new output root is written next to the input folder:
+
+```text
+D:\
+  outputs\
+    interpolation_x5_t2_t-x-y-z_N10\
+      case_a\interpolated_velocity.nc
+    mean_wake_figure1\
+      case_a\mean.nc
+      mean_wake_manifest.csv
+      mean_wake_manifest.json
+```
+
+Each batch `mean.nc` contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
+`vector_count`, `speed_from_mean`, and `abs_U`. It also contains
+`u_over_u_inf`, `wake_deficit`, and `wake_mask_u09` when `--u-inf` is provided.
+The shared `vector_count` dataset is stored by default so the interactive mean
+visualizer can support valid-fraction masking without storing three redundant
+count arrays. When the source file contains a shared interpolation
+`filled_mask`, the batch mean file copies that mask and the `t` coordinate.
+File attributes and the mean-wake manifest record the source file, command
+line, invalid-sample policy, zero-mask mode, chunk size, minimum valid fraction,
+and whether counts and filled masks were stored.
 
 Useful options:
 
-- `--pattern "*.nc"`: choose which files in the input folder are processed.
+- `--pattern "*/interpolated_velocity.nc"`: choose which files in the input
+  folder are processed.
 - `--output-name NAME`: required unless `--output-root` is used; write to
   `..\outputs\NAME` relative to the input folder. `NAME` must be new.
-- `--output-root path`: explicitly choose the output folder. The folder must
-  be new.
-- `--dry-run`: write the manifest and show what would be processed.
+- `--output-root path`: explicitly choose the shared postprocessed output
+  folder.
+- `--dry-run`: write the dry-run manifest and show what would be processed.
 - `--invalid-samples {zero,nan,zero-or-nan,none}`: choose which raw samples are
   excluded.
 - `--zero-mask {component,vector}`: choose independent component masking or
@@ -404,9 +440,8 @@ Useful options:
 - `--min-valid-fraction F`: set means to `NaN` if too few samples are valid.
 - `--chunk-size N`: number of time frames loaded at once.
 - `--u-inf 4.0`: free-stream velocity used for wake-recovery products.
-- `--overwrite`: only passed through to individual file writing after the new
-  output folder has been accepted. It does not allow reusing an existing output
-  folder.
+- `--no-store-counts`: skip valid-sample counts to make smaller files when
+  interactive valid-fraction masking is not needed.
 
 ### Compute A Temporal Average
 
@@ -438,7 +473,9 @@ Options:
   80 percent valid data at each voxel/component.
 
 The output file contains `x`, `y`, `z`, `u_mean`, `v_mean`, `w_mean`,
-`u_count`, `v_count`, `w_count`, and `speed_from_mean`.
+`speed_from_mean`, and valid-sample counts. With `--zero-mask vector`, the
+counts are stored once as `vector_count`; with `--zero-mask component`, they are
+stored as `u_count`, `v_count`, and `w_count`.
 
 When run with `--case`, the output also contains plot-ready wake products:
 `wake_deficit = (U_inf - u_mean) / U_inf` and
@@ -559,6 +596,56 @@ Available harmonic quantities are `amplitude`, `phase`, `a`, `b`, and `offset`.
 The plotted harmonic amplitude is the coherent first-harmonic response after
 the missing-bin handling described above. The phase map is displayed in degrees.
 
+To phase-average every volume in one folder, use the batch helper:
+
+```powershell
+python scripts\phase_average_folder.py "D:\outputs\interpolated_velocity_001" --output-root "D:\outputs\mean_wake_001" --dry-run
+python scripts\phase_average_folder.py "D:\outputs\interpolated_velocity_001" --output-root "D:\outputs\mean_wake_001"
+```
+
+By default this processes only interpolated files matching
+`SurgeLF*\interpolated_velocity.nc`, because the other cases are static. The
+input folder should be the interpolation output root, for example
+`D:\binning64voxel50overlap\outputs\interpolation_x5_t2_t-x-y-z_N10`. The
+output root should already contain one subfolder per case, usually from the
+mean batch script. The phase output is written beside the existing `mean.nc`:
+
+```text
+outputs\
+  mean_wake_001\
+    phase_average_manifest.csv
+    phase_average_manifest.json
+    SurgeLF_case_a\
+      mean.nc
+      phase_average.nc
+    SurgeLF_case_b\
+      mean.nc
+      phase_average.nc
+```
+
+The script has no `--overwrite` option. It refuses existing `phase_average.nc`
+files and refuses to replace existing phase-average manifest files. Dry runs
+write `phase_average_dry_run_manifest.csv` and
+`phase_average_dry_run_manifest.json`, so they do not block the real run.
+
+The SurgeLF batch defaults are:
+
+- `--pattern "SurgeLF*/interpolated_velocity.nc"`
+- `--frequency-hz 2.0`
+- `--n-phase-bins 32`
+- `--invalid-samples nan`
+- `--zero-mask vector`
+- `--min-valid-fraction 0.3`
+- `--chunk-size 50`
+- `--u-inf 4.0`
+
+The file stores phase counts, so later visualization can apply a stricter
+display threshold, for example:
+
+```powershell
+python main.py "D:\outputs\mean_wake_001\SurgeLF_case_a\phase_average.nc" --phase-average-plane --plane z --plane-value 0 --quantity u --min-valid-fraction 0.8
+```
+
 To combine the main quality checks for one voxel in a single figure, run:
 
 ```powershell
@@ -665,6 +752,47 @@ raw values, interpolated values, per-component filled flags, and the velocity
 deltas. Use the `<` and `>` buttons next to the frame slider to move exactly
 one frame at a time.
 
+To interpolate every raw velocity file in one folder, use the batch helper:
+
+```powershell
+python scripts\interpolate_velocity_folder.py "D:\my_case_exports" --output-name interpolated_velocity_001 --dry-run
+python scripts\interpolate_velocity_folder.py "D:\my_case_exports" --output-name interpolated_velocity_001
+```
+
+The script writes one output per input file:
+
+```text
+my_case_exports\
+  case_a.nc
+  case_b.nc
+outputs\
+  interpolated_velocity_001\
+    manifest.csv
+    manifest.json
+    case_a\interpolated_velocity.nc
+    case_b\interpolated_velocity.nc
+```
+
+Use `--pattern "*.nc"` to choose input files, `--limit N` for a small test run,
+and `--output-root path` when you want to choose the output folder explicitly.
+The output root must be new. This script has no `--overwrite` option, so each
+interpolation run needs a new `--output-name` or `--output-root`.
+
+The batch defaults are `--invalid-samples nan`, `--zero-mask vector`,
+`--max-temporal-gap 2`, `--max-spatial-gap 5`, and
+`--interpolation-passes 10`, with `--interpolation-workers 3` to process
+`u`, `v`, and `w` concurrently.
+
+Batch outputs store one shared `filled_mask` dataset instead of separate
+`u_filled_mask`, `v_filled_mask`, and `w_filled_mask` datasets. This saves
+space when the filled-mask locations are identical for all velocity components.
+The inspector can read both mask layouts.
+
+For very large files, reduce memory pressure with `--interpolation-workers 1`.
+The interpolation itself processes grid lines in blocks to avoid multi-GB
+temporary index arrays, but each worker still needs a full velocity component
+in memory.
+
 ### Plot Mean Wake Z-Plane Composites
 
 After `prepare_mean_wake_products.py` has created reusable `mean.nc` files, plot
@@ -715,8 +843,19 @@ annular bins around the rotor axis in the vertical-lateral `y-z` plane:
 python scripts\plot_radial_wake_deficit.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures\figure1_radial_wake_deficit_001" --rotor-y 0 --rotor-z 0 --radial-bin-width 25 --invalid-samples zero-or-nan --contour-step 0.05 --contour-label-step 0.1
 ```
 
-The plotting output folder must be new. The script refuses to write into an
-existing folder.
+Pass the common parent folder to plot all discovered case groups and distances,
+for example `...\interpolation_x5_t2_t-x-y-z_N10`. You can also pass one
+distance folder such as `...\Static_1D`; in that case the script automatically
+includes same-case sibling folders such as `Static_1.625D`, `Static_2.25D`,
+and so on. Pass `--no-sibling-distances` to use only the explicit `mean.nc`
+file or distance folder. Folders matching `*_z0`, such as
+`SurgeLF_4.75D_z0`, are excluded by default so auxiliary plane-only products do
+not duplicate a distance in the radial composite. Pass `--include-z0` to include
+them, or add `--exclude-pattern PATTERN` for extra path filters.
+
+The plotting output folder may already exist. Existing files are not
+overwritten; when needed, the script appends suffixes such as `_001`, `_002`,
+and so on to the new PNG/CSV outputs.
 
 `--rotor-y` and `--rotor-z` are required and must be given in the same
 coordinate units as the `mean.nc` file, usually millimetres for the current
@@ -733,6 +872,9 @@ Use `--invalid-samples none` only when you explicitly want to use every value
 exported by DaVis. Use `--invalid-samples zero-or-nan` for products where old
 exact-zero holes should also be removed. Use `--require-all-components` when a
 voxel should be used only if `u_mean`, `v_mean`, and `w_mean` are all valid.
+Use `--min-valid-fraction 0.8` to include only voxels with at least 80 percent
+valid raw samples before radial averaging. This requires stored count data,
+either `vector_count` or component counts, in the `mean.nc` files.
 
 Contour lines are drawn every `0.05` wake-deficit units by default, with
 numeric labels every `0.1`. Use `--contour-step 0` to disable contours, or
@@ -742,6 +884,30 @@ As with the `z=0` composite plot, files are grouped by case and ordered by
 downstream distance. If downstream volumes overlap earlier volumes, overlapping
 downstream `x` columns are masked so upstream values are kept. The overlapped
 columns are shaded transparently on the plot.
+
+### Plot Integrated Wake Deficit
+
+To compare cases quantitatively with one value per downstream distance, average
+the wake deficit over one cross-plane from each `mean.nc`:
+
+```powershell
+python scripts\plot_integrated_wake_deficit.py "D:\outputs\test_mean_wake_results" --output-folder "D:\outputs\figures" --rotor-y 0 --rotor-z 0 --rotor-diameter 1200 --min-valid-fraction 0.8
+```
+
+The x-axis is the parsed downstream distance in `D`, for example `1D`,
+`1.625D`, and `2.25D`. The y-axis is the area-averaged normalized wake deficit:
+
+```text
+mean((U_inf - u_mean) / U_inf)
+```
+
+By default the script samples the centre `x` location within each volume and
+averages the full measured `y-z` plane. Pass `--rotor-diameter 1200` to average
+inside one rotor radius, or `--integration-radius R` to set the radius
+directly. It accepts the same discovery conveniences as the radial plotter:
+passing `...\Static_1D` automatically includes same-case sibling distances,
+`*_z0` folders are excluded by default, and existing output files receive
+suffixes such as `_001`.
 
 ### Plot Plane Wake-Deficit Profiles
 
@@ -947,6 +1113,19 @@ Options:
   threshold.
 - `--quiver-step N`: arrow spacing. Larger values draw fewer arrows.
 - `--save path.png`: save the figure instead of opening an interactive window.
+
+When opened interactively, the temporal-average plane viewer includes sliders
+for the selected plane index and the minimum valid-sample fraction. The `<` and
+`>` buttons beside the plane slider move exactly one plane at a time. The
+left/down arrow keys also move to the previous plane, and the right/up arrow
+keys move to the next plane. `--min-valid-fraction` sets the initial slider
+value. Valid-fraction masking requires valid-sample counts in the mean file:
+`vector_count` for vector-mask products, or `u_count`, `v_count`, and `w_count`
+for component-mask products. Batch products store `vector_count` by default
+unless created with `scripts\prepare_mean_wake_products.py --no-store-counts`.
+If counts are missing, the figure title reports that the mask is unavailable.
+Saving with `--save` writes a static PNG using the requested command-line
+values.
 
 ### Compare Single And Double Precision
 

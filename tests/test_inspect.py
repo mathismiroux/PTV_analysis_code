@@ -336,6 +336,50 @@ def test_inspect_cell_reports_interpolated_values(tmp_path):
     assert "delta=2" in report
 
 
+def test_inspect_cell_reads_shared_interpolated_filled_mask(tmp_path):
+    raw = tmp_path / "holes.nc"
+    with h5py.File(raw, "w") as h5:
+        h5.create_dataset("t", data=np.array([0.0, 1.0, 2.0], dtype=np.float32))
+        h5.create_dataset("z", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("y", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("x", data=np.array([0.0], dtype=np.float32))
+        h5.create_dataset("u", data=np.array([[[[1.0]]], [[[0.0]]], [[[3.0]]]]))
+        h5.create_dataset("v", data=np.array([[[[2.0]]], [[[0.0]]], [[[4.0]]]]))
+        h5.create_dataset("w", data=np.array([[[[3.0]]], [[[0.0]]], [[[5.0]]]]))
+
+    interpolated_path = tmp_path / "interpolated.nc"
+    with FlowDataset(raw) as flow:
+        spatio_temporal_interpolate_velocity(
+            flow,
+            interpolated_path,
+            axes=("t",),
+            zero_mask="vector",
+            invalid_samples="zero",
+            store_component_filled_masks=False,
+        )
+
+    with (
+        FlowDataset(raw) as flow,
+        FlowDataset(interpolated_path) as interpolated,
+        h5py.File(interpolated_path, "r") as h5,
+    ):
+        assert "filled_mask" in h5
+        assert "u_filled_mask" not in h5
+        validate_interpolated_compatible(flow, interpolated)
+        cell = inspect_cell(
+            flow,
+            time_index=1,
+            z_index=0,
+            y_index=0,
+            x_index=0,
+            interpolated=interpolated,
+        )
+
+    assert cell.filled_u
+    assert cell.filled_v
+    assert cell.filled_w
+
+
 def test_format_interpolated_delta_marks_missing_raw_value():
     cell = CellInspection(
         time_index=0,

@@ -592,9 +592,54 @@ python main.py outputs\surge_st06_x3p5d\phase_average.nc --harmonic-plane --plan
 python main.py outputs\surge_st06_x3p5d\phase_average.nc --harmonic-plane --plane z --plane-value 0 --harmonic-component u --harmonic-quantity phase
 ```
 
-Available harmonic quantities are `amplitude`, `phase`, `a`, `b`, and `offset`.
-The plotted harmonic amplitude is the coherent first-harmonic response after
-the missing-bin handling described above. The phase map is displayed in degrees.
+Available harmonic quantities are `amplitude`, `phase`, `a`, `b`, `offset`, and
+`r2` when the file has been updated with harmonic R2 fields. The plotted
+harmonic amplitude is the coherent first-harmonic response after the missing-bin
+handling described above. The phase map is displayed in degrees.
+
+Existing `phase_average.nc` files can be updated with full-volume first-harmonic
+R2 fields without rerunning phase averaging:
+
+```powershell
+python scripts\add_harmonic_r2_to_phase_average_files.py "D:\outputs\mean_wake_001"
+python scripts\add_harmonic_r2_to_phase_average_files.py "D:\outputs\mean_wake_001" --components u,v --overwrite
+```
+
+This adds `u_harmonic_r2`, `v_harmonic_r2`, and `w_harmonic_r2` datasets when
+the required phase means and harmonic coefficients are present. Existing R2
+datasets are skipped unless `--overwrite` is passed. Use `--dry-run` to write a
+manifest without editing files.
+
+To make a reproducible PNG for phase-coherent amplitude maps, use the standalone
+plot helper. When given a postprocessed root, it searches all
+`phase_average.nc` files and composites all distances for one moving case in a
+single figure. When given one `phase_average.nc` file directly, it plots just
+that file:
+
+```powershell
+python scripts\plot_harmonic_amplitude_z0.py "D:\outputs\mean_wake_001" --case SurgeLF --harmonic-component u --output "D:\outputs\figures\surgeLF_u_harmonic_amplitude_z0.png"
+python scripts\plot_harmonic_amplitude_z0.py outputs\surge_st06_x3p5d\phase_average.nc --harmonic-component u --plane z --plane-value 0 --harmonic-quantity amplitude --vmin 0 --vmax 0.5 --cmap magma --output outputs\surge_u_harmonic_amplitude_z0.png
+```
+
+The defaults are `--plane z --plane-value 0 --component u
+--harmonic-quantity amplitude`. The plotter also accepts `--component v/w`,
+or the equivalent `--harmonic-component v/w`, `--harmonic-quantity
+phase/a/b/offset/r2`, `--min-valid-fraction`, `--cmap`, `--vmin/--vmax`,
+`--title`, and `--dpi`. A CSV manifest is written beside each PNG with the
+source file, selected plane, color limits, overlap mask, and visible-cell count.
+Static cases are rejected; this plot is intended for moving phase-averaged
+cases such as SurgeLF, surge, pitch, or wave.
+To intentionally plot static `phase_average.nc` files as a comparison baseline,
+pass `--include-static`:
+
+```powershell
+python scripts\plot_harmonic_amplitude_z0.py "D:\outputs\mean_wake_001" --case Static --include-static --harmonic-component u --output "D:\outputs\figures\static_u_harmonic_amplitude_z0.png"
+```
+
+By default `--min-valid-fraction 0.5` masks every voxel whose weakest phase-bin
+valid fraction for the selected component is not above 0.5. Use
+`--min-valid-fraction 0` to disable this display mask, or pass another threshold
+to make the mask looser or stricter.
 
 To phase-average every volume in one folder, use the batch helper:
 
@@ -627,6 +672,16 @@ The script has no `--overwrite` option. It refuses existing `phase_average.nc`
 files and refuses to replace existing phase-average manifest files. Dry runs
 write `phase_average_dry_run_manifest.csv` and
 `phase_average_dry_run_manifest.json`, so they do not block the real run.
+If you want to keep several dry-run manifests in the same output root, give the
+new manifest a suffix:
+
+```powershell
+python scripts\phase_average_folder.py "D:\outputs\interpolation_x5_t2_t-x-y-z_N10" --output-root "D:\outputs\mean_wake_001" --dry-run --manifest-suffix all_cases
+```
+
+This writes `phase_average_dry_run_manifest_all_cases.csv` and
+`phase_average_dry_run_manifest_all_cases.json` without replacing the existing
+dry-run manifest.
 
 The SurgeLF batch defaults are:
 

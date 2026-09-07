@@ -583,9 +583,10 @@ class PhaseAverageVolume:
             raise ValueError("axis must be one of 'x', 'y', or 'z'")
         if component not in ("u", "v", "w"):
             raise ValueError("component must be one of 'u', 'v', or 'w'")
-        if quantity not in ("amplitude", "phase", "a", "b", "offset"):
+        if quantity not in ("amplitude", "phase", "a", "b", "offset", "r2"):
             raise ValueError(
-                "quantity must be one of 'amplitude', 'phase', 'a', 'b', or 'offset'"
+                "quantity must be one of 'amplitude', 'phase', 'a', 'b', "
+                "'offset', or 'r2'"
             )
 
         axis_to_dim = {"z": 0, "y": 1, "x": 2}

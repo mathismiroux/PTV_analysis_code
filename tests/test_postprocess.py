@@ -1019,6 +1019,11 @@ def test_phase_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
             frequency_hz=1.0,
             chunk_size=2,
         )
+    with h5py.File(output, "a") as h5:
+        h5.create_dataset(
+            "u_harmonic_r2",
+            data=np.ones(h5["u_harmonic_amplitude"].shape, dtype=np.float64),
+        )
 
     with PhaseAverageVolume(output) as volume:
         assert volume.n_phase_bins == 2
@@ -1074,3 +1079,12 @@ def test_phase_average_volume_reads_x_y_z_planes(tiny_flow_path, tmp_path):
         assert harmonic_plane["vertical_axis"] == "y"
         assert harmonic_plane["dataset"] == "u_harmonic_amplitude"
         assert harmonic_plane["data"].shape == (5, 6)
+
+        r2_plane = volume.read_harmonic_plane(
+            axis="z",
+            index=1,
+            component="u",
+            quantity="r2",
+        )
+        assert r2_plane["dataset"] == "u_harmonic_r2"
+        assert r2_plane["data"].shape == (5, 6)

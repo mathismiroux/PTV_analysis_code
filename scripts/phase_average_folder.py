@@ -42,6 +42,7 @@ class PhaseAverageSettings:
     u_inf: float | None
     require_existing_case_folder: bool
     dry_run: bool
+    manifest_suffix: str
     command_line: str
 
 
@@ -99,23 +100,36 @@ def resolve_output_root(input_folder: Path, args: argparse.Namespace) -> Path:
     return default_output_root(input_folder, args.output_name)
 
 
-def manifest_paths(output_root: Path, dry_run: bool) -> tuple[Path, Path]:
+def manifest_paths(
+    output_root: Path,
+    dry_run: bool,
+    suffix: str = "",
+) -> tuple[Path, Path]:
+    suffix_part = f"_{_safe_text(suffix)}" if suffix else ""
     if dry_run:
         return (
-            output_root / PHASE_DRY_RUN_MANIFEST_CSV,
-            output_root / PHASE_DRY_RUN_MANIFEST_JSON,
+            output_root / f"phase_average_dry_run_manifest{suffix_part}.csv",
+            output_root / f"phase_average_dry_run_manifest{suffix_part}.json",
         )
-    return output_root / PHASE_MANIFEST_CSV, output_root / PHASE_MANIFEST_JSON
+    return (
+        output_root / f"phase_average_manifest{suffix_part}.csv",
+        output_root / f"phase_average_manifest{suffix_part}.json",
+    )
 
 
-def prepare_output_root(output_root: Path, allow_existing: bool, dry_run: bool) -> None:
+def prepare_output_root(
+    output_root: Path,
+    allow_existing: bool,
+    dry_run: bool,
+    manifest_suffix: str = "",
+) -> None:
     if output_root.exists() and not allow_existing:
         raise SystemExit(
             f"Refusing to use existing output folder: {output_root}. "
             "Choose a new --output-name or remove/archive the folder yourself."
         )
     output_root.mkdir(parents=True, exist_ok=True)
-    csv_path, json_path = manifest_paths(output_root, dry_run)
+    csv_path, json_path = manifest_paths(output_root, dry_run, manifest_suffix)
     existing_manifests = [
         path.name
         for path in (csv_path, json_path)
@@ -347,7 +361,11 @@ def write_manifest(
 ) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     row_list = list(rows)
-    csv_path, json_path = manifest_paths(output_root, settings.dry_run)
+    csv_path, json_path = manifest_paths(
+        output_root,
+        settings.dry_run,
+        settings.manifest_suffix,
+    )
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         if row_list:
             writer = csv.DictWriter(fh, fieldnames=list(asdict(row_list[0])))
@@ -375,6 +393,7 @@ def phase_average_folder(args: argparse.Namespace) -> list[ManifestRow]:
         output_root,
         allow_existing=args.output_root is not None,
         dry_run=args.dry_run,
+        manifest_suffix=args.manifest_suffix,
     )
     settings = PhaseAverageSettings(
         input_folder=str(input_folder),
@@ -391,6 +410,7 @@ def phase_average_folder(args: argparse.Namespace) -> list[ManifestRow]:
         u_inf=args.u_inf,
         require_existing_case_folder=args.output_root is not None,
         dry_run=args.dry_run,
+        manifest_suffix=args.manifest_suffix,
         command_line=" ".join(sys.argv),
     )
     files = discover_input_files(input_folder, args.pattern)
@@ -511,6 +531,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="free-stream velocity used for phase wake-deficit products",
     )
     parser.add_argument("--dry-run", action="store_true", help="show work without processing")
+    parser.add_argument(
+        "--manifest-suffix",
+        default="",
+        help=(
+            "optional suffix for the CSV/JSON manifest names, useful for "
+            "keeping several dry-run manifests in the same output root"
+        ),
+    )
     parser.add_argument(
         "--limit",
         type=int,

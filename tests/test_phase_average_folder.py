@@ -28,6 +28,7 @@ def test_phase_average_folder_defaults(tmp_path):
     assert args.min_valid_fraction == 0.3
     assert args.chunk_size == 50
     assert args.u_inf == 4.0
+    assert args.manifest_suffix == ""
 
 
 def test_case_id_for_nested_interpolated_source(tmp_path):
@@ -92,6 +93,47 @@ def test_phase_average_folder_refuses_existing_phase_average_manifest(
     assert "Refusing to overwrite existing phase-average manifest" in (
         result.stdout + result.stderr
     )
+
+
+def test_phase_average_folder_manifest_suffix_allows_another_dry_run_manifest(
+    tiny_flow_path, tmp_path
+):
+    input_dir = tmp_path / "inputs"
+    case_input_dir = input_dir / "SurgeLF_case_a"
+    case_input_dir.mkdir(parents=True)
+    shutil.copy2(tiny_flow_path, case_input_dir / "interpolated_velocity.nc")
+    output_root = tmp_path / "outputs" / "phase"
+    (output_root / "SurgeLF_case_a").mkdir(parents=True)
+    (output_root / "phase_average_dry_run_manifest.csv").write_text(
+        "old\n",
+        encoding="utf-8",
+    )
+    (output_root / "phase_average_dry_run_manifest.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/phase_average_folder.py",
+            str(input_dir),
+            "--output-root",
+            str(output_root),
+            "--dry-run",
+            "--manifest-suffix",
+            "all_cases",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (output_root / "phase_average_dry_run_manifest.csv").read_text(
+        encoding="utf-8"
+    ) == "old\n"
+    assert (output_root / "phase_average_dry_run_manifest_all_cases.csv").exists()
+    assert (output_root / "phase_average_dry_run_manifest_all_cases.json").exists()
 
 
 def test_phase_average_folder_skips_missing_output_case_folder(tiny_flow_path, tmp_path):

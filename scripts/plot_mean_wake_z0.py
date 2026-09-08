@@ -45,7 +45,7 @@ def require_new_output_folder(output_folder: Path) -> None:
 
 
 def discover_mean_files(mean_products_folder: Path) -> list[Path]:
-    manifest = mean_products_folder / "manifest.csv"
+    manifest = mean_products_folder / "mean_wake_manifest.csv"
     if manifest.exists():
         paths = []
         with manifest.open(newline="", encoding="utf-8") as fh:

@@ -36,6 +36,22 @@ For wake plots:
 - `--plane-axis z` selects a constant lateral plane and plots vertical profiles.
 - `--plane-axis y` selects a constant vertical plane and plots lateral profiles.
 
+## Free-flow characterization and integral scales
+
+Use the dedicated workflow for mean flow, turbulence intensity, TKE, Reynolds
+stresses and directional spatial integral-scale estimates:
+
+```powershell
+python scripts/characterize_freeflow.py "path\to\freeflow.nc" --output outputs/freeflow_baseline --length-unit mm --velocity-unit m/s --time-unit s
+```
+
+Add `--temporal` only for time-resolved snapshots to calculate point time scales
+and optional Taylor-converted streamwise lengths. Interpolated samples are
+excluded when fill masks are available. Correlations without a supported zero
+crossing produce an unresolved status, rather than an asserted integral length.
+See [the workflow guide](docs/freeflow_workflow.md) for ROI selection, units,
+outputs, estimator definitions, scientific references and quality checks.
+
 ## Quick Start
 
 From a fresh clone, create a virtual environment and install the dependencies:

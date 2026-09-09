@@ -181,9 +181,6 @@ def plot_group(
     cmap = plt.get_cmap(cmap_name).copy()
     cmap.set_bad((1, 1, 1, 0))
     ax.set_facecolor("#f0f0f0")
-    overlap_cmap = plt.get_cmap("Greys").copy()
-    overlap_cmap.set_bad((1, 1, 1, 0))
-
     covered_extents: list[tuple[float, float, float, float]] = []
     last_image = None
     report_rows = []
@@ -203,17 +200,6 @@ def plot_group(
             vmax=vmax,
             zorder=2,
         )
-        if overlap.any():
-            ax.imshow(
-                np.ma.masked_where(~overlap, overlap.astype(float)),
-                origin="lower",
-                extent=extent,
-                aspect="auto",
-                interpolation="nearest",
-                cmap=overlap_cmap,
-                alpha=0.22,
-                zorder=3,
-            )
         ax.plot(
             [plane.x_range[0], plane.x_range[1], plane.x_range[1], plane.x_range[0], plane.x_range[0]],
             [plane.y_range[0], plane.y_range[0], plane.y_range[1], plane.y_range[1], plane.y_range[0]],
@@ -257,17 +243,6 @@ def plot_group(
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
     ax.set_aspect("equal", adjustable="box")
-    ax.text(
-        0.01,
-        0.01,
-        "Downstream overlap is shaded; upstream values are kept.",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"},
-    )
-
     output = output_folder / f"{case_key}_{quantity}_z{z_requested:g}.png"
     fig.savefig(output, dpi=220)
     plt.close(fig)

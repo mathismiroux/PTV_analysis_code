@@ -684,9 +684,11 @@ outputs\
       phase_average.nc
 ```
 
-The script has no `--overwrite` option. It refuses existing `phase_average.nc`
-files and refuses to replace existing phase-average manifest files. Dry runs
-write `phase_average_dry_run_manifest.csv` and
+The script has no `--overwrite` option. It refuses to replace an existing
+output file (by default `phase_average.nc`) and refuses to replace existing
+phase-average manifest files. Use `--output-filename` to choose a descriptive
+filename, for example `phase_average_5Hz.nc`, while preserving an existing
+phase-average product. Dry runs write `phase_average_dry_run_manifest.csv` and
 `phase_average_dry_run_manifest.json`, so they do not block the real run.
 If you want to keep several dry-run manifests in the same output root, give the
 new manifest a suffix:
@@ -699,9 +701,28 @@ This writes `phase_average_dry_run_manifest_all_cases.csv` and
 `phase_average_dry_run_manifest_all_cases.json` without replacing the existing
 dry-run manifest.
 
+For the 5 Hz surge and pitch cases, `*HF*` matches both the `SurgeHF_*` and
+`PitchHF_*` case folders. The following dry run writes no phase-average data and
+shows the files that would be processed:
+
+```powershell
+python scripts\phase_average_folder.py "D:\binning64voxel50overlap\outputs\interpolation_x5_t2_t-x-y-z_N10" --pattern "*HF*/interpolated_velocity.nc" --output-root "D:\binning64voxel50overlap\outputs\interpolation_x5_t2_t-x-y-z_N10" --output-filename "phase_average_5Hz.nc" --frequency-hz 5.0 --manifest-suffix 5hz --dry-run
+```
+
+After checking the dry-run output, remove `--dry-run` to compute the products:
+
+```powershell
+python scripts\phase_average_folder.py "D:\binning64voxel50overlap\outputs\interpolation_x5_t2_t-x-y-z_N10" --pattern "*HF*/interpolated_velocity.nc" --output-root "D:\binning64voxel50overlap\outputs\interpolation_x5_t2_t-x-y-z_N10" --output-filename "phase_average_5Hz.nc" --frequency-hz 5.0 --manifest-suffix 5hz
+```
+
+These commands leave files such as `phase_average_2Hz.nc` untouched. The output
+collision check applies to the selected filename, so a case that already has
+`phase_average_5Hz.nc` is reported as existing and skipped.
+
 The SurgeLF batch defaults are:
 
 - `--pattern "SurgeLF*/interpolated_velocity.nc"`
+- `--output-filename "phase_average.nc"`
 - `--frequency-hz 2.0`
 - `--n-phase-bins 32`
 - `--invalid-samples nan`
@@ -894,7 +915,7 @@ Files are grouped by case name inferred from labels such as
 figure with multiple downstream stations. Volumes are ordered upstream to
 downstream by the distance in `D`. If downstream volumes overlap earlier
 volumes, overlapping downstream cells are masked so the upstream values are
-kept. The overlapped footprint is shaded transparently on the plot.
+kept.
 
 Useful quantities:
 
@@ -953,8 +974,7 @@ numeric labels every `0.1`. Use `--contour-step 0` to disable contours, or
 
 As with the `z=0` composite plot, files are grouped by case and ordered by
 downstream distance. If downstream volumes overlap earlier volumes, overlapping
-downstream `x` columns are masked so upstream values are kept. The overlapped
-columns are shaded transparently on the plot.
+downstream `x` columns are masked so upstream values are kept.
 
 ### Plot Integrated Wake Deficit
 

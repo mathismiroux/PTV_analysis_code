@@ -437,9 +437,6 @@ def plot_harmonic_composite(
     output.parent.mkdir(parents=True, exist_ok=True)
     cmap = plt.get_cmap(cmap_name).copy()
     cmap.set_bad((1, 1, 1, 0))
-    overlap_cmap = plt.get_cmap("Greys").copy()
-    overlap_cmap.set_bad((1, 1, 1, 0))
-
     ordered = ordered_planes(planes)
     first = ordered[0]
     fig, ax = plt.subplots(figsize=(12, 6.5), constrained_layout=True)
@@ -477,17 +474,6 @@ def plot_harmonic_composite(
             vmax=vmax,
             zorder=2,
         )
-        if overlap.any():
-            ax.imshow(
-                np.ma.masked_where(~overlap, overlap.astype(float)),
-                origin="lower",
-                extent=extent,
-                aspect="auto",
-                interpolation="nearest",
-                cmap=overlap_cmap,
-                alpha=0.22,
-                zorder=3,
-            )
         ax.plot(
             [h_range[0], h_range[1], h_range[1], h_range[0], h_range[0]],
             [v_range[0], v_range[0], v_range[1], v_range[1], v_range[0]],
@@ -535,16 +521,6 @@ def plot_harmonic_composite(
             f"{first.case_key}: {component} harmonic {harmonic_quantity}, "
             f"{first.plane_axis}={requested_plane_value:g} composite"
         )
-    )
-    ax.text(
-        0.01,
-        0.01,
-        "Downstream overlap is shaded; upstream values are kept.",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"},
     )
     fig.savefig(output, dpi=dpi)
     plt.close(fig)

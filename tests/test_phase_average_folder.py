@@ -19,6 +19,7 @@ def test_phase_average_folder_defaults(tmp_path):
     )
 
     assert args.pattern == "SurgeLF*/interpolated_velocity.nc"
+    assert args.output_filename == "phase_average.nc"
     assert args.frequency_hz == 2.0
     assert args.phase_signal is None
     assert args.phase_offset == 0.0
@@ -245,3 +246,38 @@ def test_phase_average_folder_creates_phase_average_from_nested_inputs(
         assert "u_harmonic_amplitude" in h5
         assert "wake_deficit_phase" in h5
         assert "command_line" in h5.attrs
+
+
+def test_phase_average_folder_custom_output_filename(tiny_flow_path, tmp_path):
+    input_root = tmp_path / "interpolated"
+    case_dir = input_root / "SurgeHF_case_a"
+    case_dir.mkdir(parents=True)
+    shutil.copy2(tiny_flow_path, case_dir / "interpolated_velocity.nc")
+    output_root = tmp_path / "outputs"
+    (output_root / "SurgeHF_case_a").mkdir(parents=True)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/phase_average_folder.py",
+            str(input_root),
+            "--output-root",
+            str(output_root),
+            "--pattern",
+            "*HF*/interpolated_velocity.nc",
+            "--output-filename",
+            "phase_average_5Hz.nc",
+            "--frequency-hz",
+            "5.0",
+            "--n-phase-bins",
+            "4",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    output = output_root / "SurgeHF_case_a" / "phase_average_5Hz.nc"
+    assert output.exists()
+    with h5py.File(output, "r") as h5:
+        assert h5.attrs["frequency_hz"] == 5.0

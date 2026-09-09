@@ -363,9 +363,6 @@ def plot_radial_group(
     vmax = float(np.nanpercentile(finite_values, 99.0))
     cmap = plt.get_cmap(cmap_name).copy()
     cmap.set_bad((1, 1, 1, 0))
-    overlap_cmap = plt.get_cmap("Greys").copy()
-    overlap_cmap.set_bad((1, 1, 1, 0))
-
     fig, ax = plt.subplots(figsize=(12, 6.2), constrained_layout=True)
     ax.set_facecolor("#f0f0f0")
     covered_ranges: list[tuple[float, float]] = []
@@ -395,18 +392,6 @@ def plot_radial_group(
             vmax=vmax,
             zorder=2,
         )
-        if overlap.any():
-            overlap_image = np.tile(overlap, (volume.radial_centres.size, 1))
-            ax.imshow(
-                np.ma.masked_where(~overlap_image, overlap_image.astype(float)),
-                origin="lower",
-                extent=extent,
-                aspect="auto",
-                interpolation="nearest",
-                cmap=overlap_cmap,
-                alpha=0.22,
-                zorder=3,
-            )
         if contour_step > 0:
             contour_min = np.floor(vmin / contour_step) * contour_step
             contour_max = np.ceil(vmax / contour_step) * contour_step
@@ -510,16 +495,6 @@ def plot_radial_group(
     ax.set_title(f"{case_key}: radial mean wake deficit", pad=12)
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("radial distance in vertical-lateral plane [mm]")
-    ax.text(
-        0.01,
-        0.01,
-        "Downstream overlap is shaded; upstream values are kept.",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none"},
-    )
     output, manifest, data_output = available_radial_output_paths(
         output_folder,
         case_key,

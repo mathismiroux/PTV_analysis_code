@@ -31,6 +31,7 @@ class PhaseAverageSettings:
     input_folder: str
     output_root: str
     pattern: str
+    output_filename: str
     frequency_hz: float | None
     phase_signal: str | None
     phase_offset: float
@@ -399,6 +400,7 @@ def phase_average_folder(args: argparse.Namespace) -> list[ManifestRow]:
         input_folder=str(input_folder),
         output_root=str(output_root),
         pattern=args.pattern,
+        output_filename=args.output_filename,
         frequency_hz=args.frequency_hz,
         phase_signal=str(args.phase_signal.resolve()) if args.phase_signal is not None else None,
         phase_offset=args.phase_offset,
@@ -435,7 +437,7 @@ def phase_average_folder(args: argparse.Namespace) -> list[ManifestRow]:
             )
         used_case_ids.add(case_id)
         case_dir = output_root / case_id
-        output = case_dir / "phase_average.nc"
+        output = case_dir / args.output_filename
         print(f"\n{source.name} -> {output}", flush=True)
         row = process_file(source, output, settings, case_id)
         print(f"  {row.status}: {row.reason}", flush=True)
@@ -457,6 +459,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--pattern",
         default="SurgeLF*/interpolated_velocity.nc",
         help="glob pattern for input files",
+    )
+    parser.add_argument(
+        "--output-filename",
+        default="phase_average.nc",
+        help="filename written inside each case output folder",
     )
     parser.add_argument(
         "--output-name",

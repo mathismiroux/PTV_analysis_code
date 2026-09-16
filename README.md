@@ -1189,6 +1189,7 @@ python main.py outputs\temporal_mean.nc --average-plane --plane x --plane-value 
 python main.py outputs\temporal_mean.nc --average-plane --plane y --plane-value 0 --quantity speed
 python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --min-valid-fraction 0.8
 python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --save outputs\temporal_mean_z0.png
+python main.py outputs\temporal_mean.nc --average-plane --plane z --plane-value 0 --quantity u --vmin 3 --vmax 4 --contour-step 0.05
 ```
 
 Options:
@@ -1206,7 +1207,15 @@ Options:
 - `--save path.png`: save the figure instead of opening an interactive window.
 
 When opened interactively, the temporal-average plane viewer includes sliders
-for the selected plane index and the minimum valid-sample fraction. The `<` and
+and editable `Color min` / `Color max` fields. Press Enter to apply a color
+limit; leave a field blank for automatic scaling. The `--vmin` and `--vmax`
+options set initial limits and also apply to saved figures. Contour lines are
+drawn every 0.05 velocity units (0.05 m/s for data stored in m/s), with labels,
+within the displayed color range. Use `--contour-step VALUE` to change this
+interval or `--contour-step 0` to disable contours. Contours follow the selected
+plane and valid-sample mask. Explicit color limits persist when changing planes.
+
+The sliders control the selected plane index and minimum valid-sample fraction. The `<` and
 `>` buttons beside the plane slider move exactly one plane at a time. The
 left/down arrow keys also move to the previous plane, and the right/up arrow
 keys move to the next plane. `--min-valid-fraction` sets the initial slider
@@ -1315,6 +1324,229 @@ The GIF uses one fixed color scale for the whole selected time range. By
 default, the color maximum is the largest frame-wise 99.5th percentile among
 the selected frames. Use `--color-vmax VALUE` to set it manually. Use a larger
 `--step` for a lighter preview GIF, for example `--step 10`.
+
+## 3D Q-criterion surfaces and GIF animation
+
+Use `scripts/visualize_q_criterion.py` to visualize the exported `qcri` field.
+Run these commands from the repository root after installing `requirements.txt`
+(including Plotly and scikit-image). The default data folder is
+`D:\binning64voxel75overlap_z0`; override it with `--folder`, or select an exact
+export with `--file`.
+
+Open an interactive HTML view of one station:
+
+```powershell
+python scripts/visualize_q_criterion.py --case Static --distance 1D --frame 0 --threshold 20
+```
+
+Combine all distances for one case in the same view:
+
+```powershell
+python scripts/visualize_q_criterion.py --case Static --all-distances --threshold 20
+```
+
+Replace `Static` with `SurgeLF` to select the other case. Combined plots use the
+exported coordinates and a shared threshold, with separate station colors.
+The HTML supports rotation, zoom, and switching to points above the threshold.
+It saves to `outputs/q_criterion/<file>_frame<index>.html`, or
+`outputs/q_criterion/Static_all_distances_frame0.html` for the combined example.
+Use `--output path.html` to choose another destination and `--no-open` to save
+without opening the browser.
+
+Save an animated GIF of all Static stations at **Q* = 20**:
+
+```powershell
+python scripts/visualize_q_criterion.py --case Static --all-distances --threshold 20 --gif outputs/q_criterion/Static_Q20.gif --start-frame 0 --stop-frame 200 --frame-step 5 --fps 20
+```
+
+This saves 40 frames (source indices 0, 5, ..., 195) to
+`outputs/q_criterion/Static_Q20.gif`. The stop index is exclusive; if omitted,
+the animation runs to the end of the shortest selected recording. GIF export
+uses `--start-frame`, whereas HTML uses `--frame`. `--gif` produces a GIF instead
+of HTML. Use `--elevation` and `--azimuth` to adjust the fixed GIF camera, and
+`--no-open` to save without opening a viewer. Larger frame steps produce shorter
+previews; long GIFs require more memory because Pillow retains rendered frames.
+
+`--threshold` is in normalized units **Q* = Q D²/U_inf²**, assuming exported Q
+is in s⁻². Defaults are D = 1.2 m, U_inf = 4 m/s, and coordinates in mm;
+override these with `--rotor-diameter`, `--u-inf`, and `--coordinate-unit`.
+Without `--threshold`, the level is the 90th percentile of positive valid Q
+values pooled across the selected stations. For GIFs this is calculated once
+from the first selected frame and held fixed throughout playback, along with
+the camera and axis limits. `--percentile` changes that default percentile.
+
+The combined animation plays separate recordings together; matching frame
+indices do not synchronize the acquisitions. It shows evolution within each
+station, but cannot track the same structure between stations. Playback FPS
+is independent of acquisition rate, and the overlay shows elapsed time within
+each recording. The z0 files contain only three lateral planes, so the surfaces
+represent thin slabs with gaps and overlaps retained between measured volumes.
+
+See [the Q-criterion workflow guide](docs/q_criterion_3d.md) for masking and
+additional rendering details.
+
+## Turbulence Intensity Maps
+
+Compute streamwise temporal fluctuation intensity from an interpolated velocity
+file, reusing its adjacent `mean.nc` when available:
+
+```powershell
+python scripts/plot_turbulence_intensity.py "path/to/Flow_3.5D/interpolated_velocity.nc" --output-folder outputs/Flow_3.5D_TI
+python scripts/batch_turbulence_intensity.py "path/to/case_root" --dry-run
+python scripts/batch_turbulence_intensity.py "path/to/case_root" --vmax 5
+.\scripts\batch_turbulence_intensity.bat "path/to/case_root" --vmax 5
+python scripts/plot_case_turbulence_intensity.py "path/to/case_root" --case Flow --vmax 5 --output outputs/Flow_TI_combined.png
+```
+
+The Python and `.bat` batch commands are alternatives. Batch outputs are saved
+beside each case's mean file; single-file outputs use a new directory unless
+`--alongside-mean` is passed. Products include PNG maps, full-volume NPZ fields,
+and provenance manifests. The combined plot reads saved NPZs without recomputing
+TI; rerunning it replaces the combined figure.
+
+The default is `100 * u_rms / abs(u_mean)`, with at least 80% valid temporal
+coverage and two samples. Use `--reference-velocity 4.0` for fixed normalization,
+`--min-valid-fraction` for coverage, and `--mean-file` on the single-file command
+to select a mean explicitly. Interpolated samples and coherent oscillations are
+included. See [the TI guide](docs/turbulence_intensity.md) for masking, batch
+selection, output protection, and definitions.
+
+## POD Common Support And Frequency-Band Comparisons
+
+For ordinary single-volume and batch POD commands, see
+[the POD guide](docs/pod_workflow.md). To compare cases on identical spatial
+support at each downstream station, first prepare a mask and inspect the saved
+`review.html`, `review.md`, and coverage report:
+
+```powershell
+python scripts/pod_common_mask.py prepare --flow-folder "path/to/flow_root" --cases-folder "path/to/cases_root" --min-valid-fraction 0.8 --modes 100 --output-subfolder pod_common_valid80_modes100 --output outputs/pod_common_review
+python scripts/pod_common_mask.py run outputs/pod_common_review/plan.json --volumes 1
+```
+
+Preparation does not run POD. The second command executes only the 1D station;
+omit `--volumes` to run all prepared stations. Use new preview and POD output
+directories. The mask intersects valid support across cases after alignment to
+the reference grid, without extrapolation. Means are recomputed per case;
+remaining temporal gaps become zero fluctuations, not reconstructed samples.
+`scripts/pod_volume.py` and `scripts/pod_folder.py` also accept
+`--spatial-mask path/to/volume_1D_mask.npz`; validity settings must match the
+prepared mask, and `--mean-file` cannot be combined with it.
+
+To save separate velocity copies aligned only in z, without running POD:
+
+```powershell
+python scripts/align_velocity_z.py "path/to/PitchHF_1D/interpolated_velocity.nc" "path/to/PitchLF_1D/interpolated_velocity.nc" --reference "path/to/Flow_1D/interpolated_velocity.nc" --output-root outputs/pitch_aligned
+```
+
+This requires matching x/y grids, preserves timestamps, and writes into a new
+root with the source case folder names. See
+[the common-mask guide](docs/pod_common_mask_workflow.md) for alignment rules,
+mask provenance, and saved-plan validation.
+
+Generate spectra from saved PODs, integrate a band, then compare the Flow and
+turbine-case CSVs at matching downstream stations:
+
+```powershell
+python scripts/pod_spectra_folder.py "path/to/flow_root" --pattern "*/pod_common_valid80_modes100/pod.h5" --output-subfolder modal_spectra
+python scripts/pod_spectra_folder.py "path/to/cases_root" --pattern "*/pod_common_valid80_modes100/pod.h5" --output-subfolder modal_spectra
+python scripts/integrate_pod_band.py "path/to/flow_root" --pattern "*/pod_common_valid80_modes100/modal_spectra/modal_spectra.h5" --band-hz 0 1 --output outputs/flow_band_0_1Hz.csv
+python scripts/integrate_pod_band.py "path/to/cases_root" --pattern "*/pod_common_valid80_modes100/modal_spectra/modal_spectra.h5" --band-hz 0 1 --output outputs/cases_band_0_1Hz.csv
+python scripts/compare_pod_band.py --flow-csv outputs/flow_band_0_1Hz.csv --cases-csv outputs/cases_band_0_1Hz.csv --output outputs/pod_band_comparison
+```
+
+These commands read saved products and protect existing outputs. Band energy
+includes only saved modes, while fractions retain the full POD energy
+denominator. Integration includes bin centres at both boundaries, so adjacent
+bands can share a bin. The comparison does not itself enforce common support;
+choose matching processing runs. See [the spectra guide](docs/pod_spectra_workflow.md)
+for estimators, output columns, and interpretation.
+
+## Mean Slab Velocities And Wake Geometry
+
+Export equal-voxel spatial averages of temporal mean velocity over each y-z
+slab, using case folders containing `mean.nc` and valid-sample counts:
+
+```powershell
+python scripts/plot_slab_vertical_velocity.py "path/to/flow_root" --case-pattern "Flow*" --quantity v --output-folder outputs/slabs/Flow
+python scripts/plot_slab_vertical_velocity.py "path/to/cases_root" --case-pattern "Static*" --quantity v --output-folder outputs/slabs/Static
+python scripts/compare_slab_vertical_velocity.py outputs/slabs --central-fraction 0.6 --output-folder outputs/slabs_comparison
+python scripts/common_mask_slab_velocity.py outputs/slabs --quantity v --reference-case Flow --output-folder outputs/slabs_common
+python scripts/compare_slab_vertical_velocity.py outputs/slabs_common --central-fraction 0.6 --mask-description "Common spatial support" --output-folder outputs/slabs_common_comparison
+```
+
+Repeat the export for other case patterns before comparing. The exporter accepts
+`--quantity u`, `v` (vertical, default), or `w`; the comparison command reads
+vertical-velocity CSVs only. Coverage must be **strictly greater than**
+`--min-valid-fraction` (default 0.8). `--rotor-diameter` defaults to 1200 in
+coordinate units. Exports contain CSV, PNG, PDF, HTML, and a manifest; comparisons
+preserve separate volume segments and optionally select their central extent.
+
+The common-mask command discovers original mean files through the vertical-slab
+export manifests, then recomputes averages on their shared valid support. Every
+station must contain all discovered cases. It crops the reference grid to the
+shared extent, aligns differing grids linearly without extrapolation, and saves
+per-case CSVs, manifests, and `common_masks.npz`. Its `--quantity` can also select
+u or w, but those CSVs cannot be passed to the vertical comparison command.
+Use new output directories for all these commands.
+
+For static wake geometry, input folders must contain `Static*/mean.nc` with
+`u_mean` and a positive `u_inf` attribute. Export two interior y-z slices per
+volume, then build an interactive 3D view from those saved slices:
+
+```powershell
+python scripts/plot_static_wake_yz.py "path/to/cases_root" --output-folder outputs/static_yz
+python scripts/plot_static_wake_3d.py outputs/static_yz --output outputs/static_slices.html
+```
+
+The slices are nearest to one-third and two-thirds of each volume's downstream
+extent. Outputs include PNG/PDF figures, `planes.npz`, and `manifest.json`.
+The 3D command reads the latter two files; it does not create a full volume.
+
+For full-volume deficit isosurfaces and measured wake-centre traces:
+
+```powershell
+python scripts/plot_static_wake_volume.py "path/to/cases_root" --min-valid-fraction 0.8 --output-folder outputs/static_volume
+python scripts/fit_static_wake_center.py outputs/static_volume/measured_wake_center.csv --edge-fraction 0.2 --output-folder outputs/static_center_fits
+```
+
+The volume command writes `static_wake_volume.html`, `measured_wake_center.csv`,
+and a manifest. `--case-pattern` and `--case-label` select other cases; the
+optional coverage cutoff requires counts and uses a strict greater-than test.
+The fit command reads that CSV and adjacent manifest, excludes 20% from each
+end of each volume by default, and saves individual/pooled linear fits, CSVs,
+PNG/PDF/HTML figures, and edge-selection sensitivity in its manifest. The centre
+is the positive-deficit centroid within measured coverage; truncation can shift
+it, and fit R² is descriptive. These tools use new output paths and default to
+a rotor diameter of 1200 coordinate units. Plotly and scikit-image are included
+in `requirements.txt` for the interactive volume plots.
+
+## 7-Hole-Probe Profiles And Spectra
+
+Compare the predefined floor/no-floor recording pairs, or calculate velocity
+PSDs for selected recordings and heights:
+
+```powershell
+python scripts/compare_7hp_floor.py --data-dir "path/to/Data7HPpost" --output outputs/7hp_floor_comparison
+python scripts/psd_7hp.py 1028 --data-dir "path/to/Data7HPpost" --component 6
+python scripts/psd_7hp.py 1028 --compare 1020 1060 --data-dir "path/to/Data7HPpost" --component 5 --heights 200 600 1000
+```
+
+The floor comparison saves profile/distribution figures, tables, and a manifest;
+reruns can replace its outputs. It retains MATLAB's streamwise profile
+convention and labels transverse components by column number unless
+`--vertical-column 5` or `6` is supplied (`--vertical-sign` controls its sign).
+The physical mapping of those transverse columns is not confirmed.
+
+PSD component aliases are `u`/`4`, `v`/`5`, and `w`/`6`; these are column aliases.
+The default sample rate is 245 Hz (`--fs` overrides it), with 1024-sample Welch
+segments and 50% overlap. Each PSD run creates a new output directory with
+PNG/PDF figures, PSD and summary CSVs, and a manifest; `--output` selects it.
+Recording 1061 includes continuation 1063 unless `--no-continuation` is used.
+See [the 7HP PSD guide](docs/7hp_psd.md) for data paths, height selection,
+sampling assumptions, and spectral settings.
+
+After an editable install, `ptv-7hp-psd` provides the same PSD command;
+`python -m ptv_flow.probe_psd` also works.
 
 ## Optional Editable Install
 

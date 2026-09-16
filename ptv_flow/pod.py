@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 
 from .reader import FlowDataset
+from .pod_support import load_spatial_mask, read_native_plane, read_aligned_plane
 
 
 def cell_widths(values):
@@ -65,7 +66,7 @@ def decompose(matrix, modes=20, oversampling=15, iterations=2, seed=0, block=409
 
 def run_pod(source, output, modes=20, min_valid_fraction=1.0,
             exclude_filled=False, zero_invalid=False, iterations=2, seed=0,
-            oversampling=15, mean_file=None):
+            oversampling=15, mean_file=None, spatial_mask=None):
     source, output = Path(source).resolve(), Path(output).resolve()
     if not 0 < min_valid_fraction <= 1 or modes < 1:
         raise ValueError("Require modes >= 1 and 0 < min_valid_fraction <= 1")
@@ -76,9 +77,18 @@ def run_pod(source, output, modes=20, min_valid_fraction=1.0,
         if nt < 2:
             raise ValueError("POD requires at least two snapshots")
         coords = {k: flow.coordinate(k) for k in ("t", "z", "y", "x")}
+    required_support = None
+    mask_metadata = None
+    if spatial_mask is not None:
+        if mean_file is not None:
+            raise ValueError('Common-mask POD recomputes each case mean; do not pass --mean-file')
+        target, required_support, mask_metadata = load_spatial_mask(
+            spatial_mask, source, min_valid_fraction, exclude_filled, zero_invalid)
+        coords.update(target)
+        nz, ny, nx = required_support.shape
     mean_path = Path(mean_file).resolve() if mean_file else source.parent / 'mean.nc'
     existing_mean = None
-    if mean_path.exists():
+    if mean_path.exists() and required_support is None:
         if exclude_filled or zero_invalid:
             raise ValueError("Existing mean reuse currently requires default finite-vector validity settings")
         with h5py.File(mean_path, 'r') as saved:
@@ -111,22 +121,17 @@ def run_pod(source, output, modes=20, min_valid_fraction=1.0,
         try:
             with h5py.File(source, 'r') as src:
                 for iz in range(nz):
-                    data = np.stack([src[k][:, iz].astype(float) for k in 'uvw'])
-                    finite = np.all(np.isfinite(data), axis=0)
-                    for ic, k in enumerate('uvw'):
-                        for attr in ('_FillValue', 'missing_value'):
-                            if attr in src[k].attrs:
-                                for value in np.asarray(src[k].attrs[attr]).ravel():
-                                    finite &= data[ic] != value
-                    if zero_invalid:
-                        finite &= np.any(data != 0, axis=0)
-                    if exclude_filled:
-                        if 'filled_mask' not in src:
-                            raise ValueError("--exclude-filled requires filled_mask")
-                        finite &= src['filled_mask'][:, iz] == 0
+                    if required_support is None:
+                        data, finite = read_native_plane(src, iz, exclude_filled, zero_invalid)
+                    else:
+                        data, finite = read_aligned_plane(src, iz, coords, exclude_filled, zero_invalid)
                     count = finite.sum(axis=0)
                     valid_fraction[iz] = count / nt
                     keep = (count >= np.ceil(min_valid_fraction * nt)) & (count >= 2)
+                    if required_support is not None:
+                        if np.any(required_support[iz] & ~keep):
+                            raise ValueError('Prepared common support no longer meets the validity threshold')
+                        keep &= required_support[iz]
                     support[iz] = keep
                     if existing_mean is not None:
                         avg = existing_mean[:, iz]
@@ -182,6 +187,10 @@ def run_pod(source, output, modes=20, min_valid_fraction=1.0,
                     saved_energy_fraction=float(fractions.sum()), seed=seed,
                     iterations=iterations, oversampling=oversampling,
                     max_relative_eigen_residual=float(residuals.max()))
+    if spatial_mask is not None:
+        metadata.update(spatial_mask=str(Path(spatial_mask).resolve()), common_mask_metadata=mask_metadata,
+                        mean_policy='recomputed per case from valid aligned velocity vectors',
+                        grid_alignment='linear to common reference grid; all contributors must be valid')
     with h5py.File(output / 'pod.h5', 'w') as dst:
         dst.attrs['metadata_json'] = json.dumps(metadata)
         for key, value in coords.items():

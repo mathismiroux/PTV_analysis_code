@@ -14,10 +14,13 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=10.0",
     "PyYAML>=6.0",
+    "plotly>=5.0",
+    "scikit-image>=0.22",
 ]
 
 [project.scripts]
 ptv-flow = "ptv_flow.cli:main"
+ptv-7hp-psd = "ptv_flow.probe_psd:main"
 
 [tool.setuptools.packages.find]
 include = ["ptv_flow*"]

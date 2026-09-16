@@ -4,7 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, Slider
+from matplotlib.widgets import Button, Slider, TextBox
 import numpy as np
 
 from ptv_flow.postprocess import PhaseAverageVolume, TemporalAverageVolume
@@ -250,11 +250,22 @@ def show_temporal_average_plane(
     quiver_step: int = 3,
     save: Path | None = None,
     min_valid_fraction: float = 0.0,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    contour_step: float = 0.05,
 ) -> None:
     """Show one x, y, or z plane from a temporal-average volume."""
 
     if quiver_step <= 0:
         raise ValueError("quiver_step must be positive")
+    if any(value is not None and not np.isfinite(value) for value in (vmin, vmax)):
+        raise ValueError("Color limits must be finite")
+    if vmin is not None and vmax is not None and vmin >= vmax:
+        raise ValueError("vmin must be smaller than vmax")
+    if not np.isfinite(contour_step) or contour_step < 0:
+        raise ValueError("contour_step must be finite and nonnegative")
+    color_limits = [vmin, vmax]
+    contour = None
     axis_to_dim = {"z": 0, "y": 1, "x": 2}
     if plane_axis not in axis_to_dim:
         raise ValueError("plane_axis must be one of 'x', 'y', or 'z'")
@@ -288,14 +299,42 @@ def show_temporal_average_plane(
 
     def apply_color_limits(scalar: np.ndarray) -> None:
         finite = scalar[np.isfinite(scalar)]
-        if not finite.size:
-            return
-        if quantity in {"u", "v", "w"}:
-            limit = float(np.nanmax(np.abs(finite)))
-            if limit > 0:
-                image.set_clim(-limit, limit)
+        if finite.size and quantity in {"u", "v", "w"}:
+            limit = float(np.max(np.abs(finite))) or 1.0
+            low, high = -limit, limit
+        elif finite.size:
+            low, high = float(finite.min()), float(finite.max())
         else:
-            image.set_clim(float(np.nanmin(finite)), float(np.nanmax(finite)))
+            low, high = 0.0, 1.0
+        low = low if color_limits[0] is None else color_limits[0]
+        high = high if color_limits[1] is None else color_limits[1]
+        if low >= high:
+            if color_limits[1] is None:
+                high = low + 1.0
+            else:
+                low = high - 1.0
+        image.set_clim(low, high)
+
+    def draw_contours(plane, scalar: np.ndarray) -> None:
+        nonlocal contour
+        if contour is not None:
+            contour.remove()
+            contour = None
+        finite = scalar[np.isfinite(scalar)]
+        if not contour_step or not finite.size or min(scalar.shape) < 2:
+            return
+        low, high = image.get_clim()
+        low, high = max(low, float(finite.min())), min(high, float(finite.max()))
+        first = np.floor(low / contour_step) + 1
+        stop = np.ceil(high / contour_step)
+        if stop <= first:
+            return
+        levels = np.arange(first, stop) * contour_step
+        contour = ax.contour(
+            plane["horizontal"], plane["vertical"], np.ma.masked_invalid(scalar),
+            levels=levels, colors="black", linewidths=0.6, alpha=0.65,
+        )
+        ax.clabel(contour, inline=True, fontsize=8, fmt="%g")
 
     def title_text(
         plane: dict[str, np.ndarray | float | int | str],
@@ -330,7 +369,7 @@ def show_temporal_average_plane(
         constrained_layout=not use_interactive_controls,
     )
     if use_interactive_controls:
-        fig.subplots_adjust(bottom=0.22)
+        fig.subplots_adjust(bottom=0.28)
 
     image, quiver, q_slice = _draw_xy_vector_plane(
         ax=ax,
@@ -347,6 +386,7 @@ def show_temporal_average_plane(
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(colorbar_label)
     apply_color_limits(scalar)
+    draw_contours(plane, scalar)
     title = ax.set_title(
         title_text(plane, min_valid_fraction, min_valid_count, mask_summary)
     )
@@ -407,6 +447,11 @@ def show_temporal_average_plane(
             if plane_slider is not None:
                 controls.append(plane_slider)
             controls.append(fraction_slider)
+            min_box = TextBox(fig.add_axes((0.22, 0.17, 0.22, 0.035)), "Color min ",
+                              initial="" if vmin is None else str(vmin))
+            max_box = TextBox(fig.add_axes((0.65, 0.17, 0.22, 0.035)), "Color max ",
+                              initial="" if vmax is None else str(vmax))
+            controls.extend([min_box, max_box])
 
             def redraw(_value: float | None = None) -> None:
                 assert fraction_slider is not None
@@ -423,6 +468,7 @@ def show_temporal_average_plane(
                     plane["vector_vertical"][q_slice],
                 )
                 apply_color_limits(scalar)
+                draw_contours(plane, scalar)
                 title.set_text(
                     title_text(
                         plane,
@@ -432,6 +478,23 @@ def show_temporal_average_plane(
                     )
                 )
                 fig.canvas.draw_idle()
+
+            def update_color_limits(_text: str) -> None:
+                try:
+                    limits = [float(box.text) if box.text.strip() else None
+                              for box in (min_box, max_box)]
+                    if any(v is not None and not np.isfinite(v) for v in limits):
+                        raise ValueError
+                    if all(v is not None for v in limits) and limits[0] >= limits[1]:
+                        raise ValueError
+                except ValueError:
+                    print("Enter finite color limits with min < max; leave blank for automatic.")
+                    return
+                color_limits[:] = limits
+                redraw()
+
+            min_box.on_submit(update_color_limits)
+            max_box.on_submit(update_color_limits)
 
             def step_plane(delta: int) -> None:
                 if plane_slider is None:

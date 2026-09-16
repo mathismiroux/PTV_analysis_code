@@ -17,12 +17,13 @@ def add_settings(parser):
     parser.add_argument('--iterations', type=int, default=2, help='Increase for better convergence')
     parser.add_argument('--oversampling', type=int, default=15)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--spatial-mask', type=Path, help='Prepared common-mask NPZ; enforces identical spatial support')
 
 
 def settings(args):
     return {key: getattr(args, key) for key in
             ('modes', 'min_valid_fraction', 'exclude_filled', 'zero_invalid',
-             'iterations', 'oversampling', 'seed', 'mean_file')}
+             'iterations', 'oversampling', 'seed', 'mean_file', 'spatial_mask')}
 
 
 def main():

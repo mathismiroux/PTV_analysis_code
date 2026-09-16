@@ -1,5 +1,9 @@
 # Spatial POD of velocity volumes
 
+For Flow/Static/moving-case comparisons on identical spatial support, see the
+[common-mask preparation and review workflow](pod_common_mask_workflow.md).
+It previews the intersection per downstream volume before an explicit POD run.
+
 Run one case using the existing interpolated snapshots and the `mean.nc` beside
 them (automatically detected):
 

@@ -478,6 +478,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="scalar quantity to plot for --average-plane",
     )
     parser.add_argument(
+        "--vmin", type=float, help="color minimum for --average-plane",
+    )
+    parser.add_argument(
+        "--vmax", type=float, help="color maximum for --average-plane",
+    )
+    parser.add_argument(
+        "--contour-step", type=float, default=0.05,
+        help="contour interval in velocity units for --average-plane (default: 0.05; 0 disables)",
+    )
+    parser.add_argument(
         "--phase-field",
         choices=("phase_mean", "coherent"),
         default="phase_mean",
@@ -773,6 +783,9 @@ def main() -> None:
                 quiver_step=args.quiver_step,
                 save=args.save,
                 min_valid_fraction=args.min_valid_fraction,
+                vmin=args.vmin,
+                vmax=args.vmax,
+                contour_step=args.contour_step,
             )
         return
 
